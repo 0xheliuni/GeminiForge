@@ -1,154 +1,229 @@
-# 🚀 GeminiForge (原 gtgm)
+# GeminiForge
 
-基于 GitHub Actions 的 Gemini Business 账号自动注册工具，支持 VLESS 代理和定时任务。
+`GeminiForge` 用于自动注册和刷新 Gemini Business 账号，并把结果同步到 `gemini-business2api`。
 
-## ✨ 功能特点
+## 已支持能力
 
-- 🔄 **自动注册** - 每6小时自动注册新账号
-- 🌐 **代理支持** - 支持 HTTP/SOCKS5/VLESS 代理
-- 📦 **自动同步** - 注册后自动同步凭证到远程 API
-- 🎭 **无头浏览器** - 使用 Playwright 模拟真实浏览器
-- ⚡ **并发注册** - 支持多账号并发注册
+- 支持 `worker` 邮箱
+- 支持 `moemail` 邮箱
+- 支持自动上传到 `gemini-business2api`
+- 支持刷新已过期或即将过期的账号
+- 支持配置文件方式运行
+- 支持 GitHub Actions 部署
 
----
+## 本次配置方式
 
-## 📋 快速开始
+现在支持两种配置方式：
 
-### 第一步：Fork 仓库
+1. 环境变量 / GitHub Secrets
+2. 配置文件 `config.json` / `config.local.json`
 
-点击右上角 `Fork` 按钮，将此仓库复制到你的 GitHub 账户。
+配置优先级：
 
-### 第二步：配置 Secrets
+1. 环境变量
+2. `config.local.json`
+3. `config.json`
+4. 代码默认值
 
-进入仓库 **Settings** → **Secrets and variables** → **Actions**，添加以下密钥：
+这意味着你可以：
 
-#### 必填配置
+- 把大部分配置放进配置文件
+- 再用少量 Secrets 覆盖敏感值
+- 本地和 GitHub 共用同一套结构
 
-| Secret | 说明 | 示例 |
-|--------|------|------|
-| `WORKER_DOMAIN` | 邮箱 Worker 域名（后端Worker） | `email.example.com` |
-| `EMAIL_DOMAIN` | 注册的邮箱域名 | `mail.example.com` |
-| `ADMIN_PASSWORD` | 邮箱管理密码 | `your_password` |
-| `SYNC_URL` | 同步 API 地址 | `https://xxx.hf.space` |
-| `SYNC_KEY` | 同步 API 密钥 | `your_api_key` |
+## 配置文件
 
-#### 代理配置（可选）
+模板文件：`GeminiForge/config.example.json`
 
-| Secret | 说明 | 示例 |
-|--------|------|------|
-| `PROXY` | HTTP/SOCKS5 代理 | `http://host:port` |
-| `VLESS_CONFIG` | VLESS 代理配置 | 见下方说明 |
+建议：
 
-### 第三步：运行
+- 本地复制为 `config.local.json`
+- GitHub 上使用 Secret `CONFIG_JSON`
 
-- **手动运行**：Actions → `Gemini Business Account Registration` → `Run workflow`
-- **定时运行**：每6小时自动运行（北京时间 08:00, 14:00, 20:00, 02:00）
+默认会自动查找：
 
----
+- `config.local.json`
+- `config.json`
 
-## ⚙️ 运行参数
+也可以手动指定：
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `count` | 注册账号数量 | 手动: 1, 定时: 2 |
-| `concurrent` | 并发数 (1-5) | 1 |
-
----
-
-## 🔒 代理配置详解
-
-### HTTP/SOCKS5 代理
-
-设置 `PROXY` Secret：
-
-```
-http://host:port
-http://user:pass@host:port
-socks5://host:port
+```text
+CONFIG_PATH=config.json
 ```
 
-### VLESS 代理
+### 配置文件示例
 
-设置 `VLESS_CONFIG` Secret，支持两种格式：
-
-**格式一：VLESS URL（推荐）**
-
-```
-vless://uuid@server:port?type=tcp&security=reality&sni=example.com&fp=chrome&pbk=xxx
-```
-
-**格式二：YAML 配置**
-
-```yaml
-{ server: example.com, port: 443, uuid: xxx-xxx, flow: xtls-rprx-vision, ... }
-```
-
-> ⚠️ **注意**：使用 VLESS 代理时会自动安装 sing-box
-
----
-
-## 📁 项目结构
-
-```
-gtgm/
-├── register.py          # 主注册脚本
-├── proxy_helper.py      # VLESS 代理启动器
-├── requirements.txt     # Python 依赖
-├── README.md            # 说明文档
-└── .github/
-    └── workflows/
-        └── register.yml # GitHub Actions 工作流
+```json
+{
+  "run_mode": "both",
+  "email_provider": "moemail",
+  "worker_domain": "",
+  "email_domain": "",
+  "admin_password": "",
+  "moemail_base_url": "https://moemail.app",
+  "moemail_api_key": "your_api_key",
+  "moemail_domain": "",
+  "sync_url": "https://your-gemini-business2api.example.com",
+  "sync_key": "your_sync_key",
+  "register_count": 1,
+  "concurrent": 1,
+  "refresh_before_hours": 0,
+  "refresh_limit": 0,
+  "refresh_include_disabled": false,
+  "account_expire_hours": 20,
+  "proxy": "",
+  "proxy_email": false,
+  "vless_config": ""
+}
 ```
 
----
+## 关键参数
 
-## 🔧 技术实现
+### 通用
 
-| 组件 | 技术 | 说明 |
-|------|------|------|
-| 浏览器 | Playwright | 无头 Chromium 浏览器 |
-| 代理 | sing-box | VLESS/Reality 代理客户端 |
-| 并发 | asyncio | Python 异步并发 |
-| HTTP | requests | 带连接池的 HTTP 客户端 |
+- `run_mode`：`register` / `refresh` / `both`
+- `sync_url`：`gemini-business2api` 地址
+- `sync_key`：`gemini-business2api` 管理密钥
+- `register_count`：注册数量
+- `concurrent`：并发数
+- `refresh_before_hours`：提前多少小时刷新，`0` 表示只刷新已过期账号
+- `refresh_limit`：单次最多刷新多少个，`0` 表示不限制
+- `refresh_include_disabled`：是否包含 `disabled=true` 的账号
+- `account_expire_hours`：上传时写入的过期小时数，默认 `20`
+- `proxy`：浏览器和同步接口代理
+- `proxy_email`：邮箱 API 是否也走代理
+- `vless_config`：可选
 
----
+### `worker` 模式
 
-## ❓ 常见问题
+- `email_provider=worker`
+- `worker_domain`
+- `email_domain`
+- `admin_password`
 
-### Q: 注册失败，提示连接重置？
+### `moemail` 模式
 
-A: 检查代理是否可用。可以尝试更换代理节点。
+- `email_provider=moemail`
+- `moemail_base_url`
+- `moemail_api_key`
+- `moemail_domain`
 
-### Q: 凭证有效期显示不正确？
+## 为什么现在能自动刷新
 
-A: 已自动处理时区问题，凭证有效期为12小时（北京时间）。
+`gemini-business2api` 的刷新功能不只需要 Gemini cookie，还需要邮箱提供商信息和邮箱凭据。
 
-### Q: 如何修改定时运行频率？
+现在上传的账号会自动携带：
 
-A: 编辑 `.github/workflows/register.yml` 中的 `cron` 表达式。
+- `mail_provider`
+- `mail_address`
+- `mail_password`
+- `mail_base_url`
+- `mail_api_key`
+- `mail_domain`
 
----
+其中：
 
-## 📜 许可证
+- `moemail` 的 `mail_password` 保存的是 `email_id`
+- 这和 `gemini-business2api` 现有刷新逻辑兼容
 
-MIT License
+## GitHub Actions Secrets
 
----
+### 方案一：拆分多个 Secret
 
-## 🙏 感谢
+#### `moemail` 推荐方案
 
-本项目的实现参考了以下资源，特此感谢：
+```text
+EMAIL_PROVIDER=moemail
+MOEMAIL_BASE_URL=https://moemail.app
+MOEMAIL_API_KEY=你的_moemail_api_key
+MOEMAIL_DOMAIN=
+SYNC_URL=https://你的_gemini-business2api_地址
+SYNC_KEY=你的_gemini_business2api_admin_key
+REFRESH_BEFORE_HOURS=0
+REFRESH_LIMIT=0
+REFRESH_INCLUDE_DISABLED=false
+```
 
-### 注册机逻辑
-- GitHub: [xLmiler/test_band](https://github.com/xLmiler/test_band)
-- Linux.do: [相关讨论帖](https://linux.do/t/topic/1234455?u=starsdream)
+#### `worker` 方案
 
-### API 反代
-- Linux.do: [2API 反代教程](https://linux.do/t/topic/1225645?u=starsdream)
+```text
+EMAIL_PROVIDER=worker
+WORKER_DOMAIN=你的_worker_域名
+EMAIL_DOMAIN=你的邮箱域名
+ADMIN_PASSWORD=你的_worker_admin_password
+SYNC_URL=https://你的_gemini-business2api_地址
+SYNC_KEY=你的_gemini_business2api_admin_key
+REFRESH_BEFORE_HOURS=0
+REFRESH_LIMIT=0
+REFRESH_INCLUDE_DISABLED=false
+```
 
-### Hugging Face 镜像
-- Linux.do: [HF 镜像部署](https://linux.do/t/topic/1226413?u=starsdream)
+### 方案二：只用一个配置文件 Secret
 
-### 域名邮箱搭建
-- Linux.do: [域名邮箱教程](https://linux.do/t/topic/316819?u=starsdream)
-- 官方文档: [Temp Mail Docs](https://temp-mail-docs.awsl.uk)
+如果你想把配置提取成文件结构，同时仍在 GitHub 上部署，推荐直接使用：
+
+```text
+CONFIG_JSON={"run_mode":"both","email_provider":"moemail","moemail_base_url":"https://moemail.app","moemail_api_key":"你的key","moemail_domain":"","sync_url":"https://你的2api地址","sync_key":"你的管理密钥","register_count":1,"concurrent":1,"refresh_before_hours":0,"refresh_limit":0,"refresh_include_disabled":false,"account_expire_hours":20,"proxy":"","proxy_email":false,"vless_config":""}
+```
+
+工作流会自动把它写成 `config.json` 再执行。
+
+## 可选代理配置
+
+```text
+PROXY=http://user:pass@host:port
+PROXY_EMAIL=false
+VLESS_CONFIG=
+```
+
+说明：
+
+- `PROXY` 给浏览器和同步接口使用
+- `PROXY_EMAIL=true` 时，邮箱 API 也会走代理
+
+## 工作流说明
+
+工作流文件：`GeminiForge/.github/workflows/register.yml`
+
+已支持：
+
+- 传统 Secrets 方式
+- `CONFIG_JSON` 自动生成配置文件方式
+
+手动触发参数：
+
+- `mode`
+- `mail_provider`
+- `count`
+- `concurrent`
+- `refresh_before_hours`
+
+推荐手动输入：
+
+```text
+mode=both
+mail_provider=moemail
+count=1
+concurrent=1
+refresh_before_hours=0
+```
+
+含义：
+
+1. 先刷新过期账号
+2. 再注册新账号
+3. 最后自动上传到 `gemini-business2api`
+
+定时任务默认每 6 小时执行一次。
+
+## 文件说明
+
+- `GeminiForge/register.py`：主逻辑
+- `GeminiForge/config.example.json`：配置文件模板
+- `GeminiForge/.github/workflows/register.yml`：GitHub Actions 工作流
+
+## 变更范围
+
+只修改了 `GeminiForge`。
+
+`gemini-business2api` 仅用于参考，没有改动任何一个字符。

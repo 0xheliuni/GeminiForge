@@ -8,8 +8,11 @@ __pycache__/
 .Python
 *.so
 .env
+.env.local
 .venv/
 venv/
+config.json
+config.local.json
 
 # IDE
 .idea/

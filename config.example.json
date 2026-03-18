@@ -1,0 +1,23 @@
+{
+  "run_mode": "both",
+  "email_provider": "moemail",
+  "worker_domain": "",
+  "email_domain": "",
+  "admin_password": "",
+  "moemail_base_url": "https://moemail.app",
+  "moemail_api_key": "",
+  "moemail_domain": "",
+  "sync_url": "https://your-gemini-business2api.example.com",
+  "sync_key": "",
+  "register_count": 1,
+  "concurrent": 1,
+  "refresh_before_hours": 0,
+  "refresh_limit": 0,
+  "refresh_include_disabled": false,
+  "account_expire_hours": 20,
+  "browser_headless": true,
+  "browser_slow_mo_ms": 0,
+  "proxy": "",
+  "proxy_email": false,
+  "vless_config": ""
+}

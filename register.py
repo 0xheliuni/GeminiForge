@@ -1,462 +1,783 @@
 # -*- coding: utf-8 -*-
-"""
-GeminiForge (原 gtgm) - Gemini Business 账号注册机
-专为GitHub Actions无头环境设计，使用Playwright替代DrissionPage
-
-环境变量配置:
-  - WORKER_DOMAIN: 邮箱Worker域名
-  - EMAIL_DOMAIN: 邮箱域名  
-  - ADMIN_PASSWORD: 管理密码
-  - SYNC_URL: 同步API地址
-  - SYNC_KEY: 同步API密钥
-  - REGISTER_COUNT: 注册数量 (默认1)
-  - CONCURRENT: 并发数 (默认1)
-  - PROXY: 代理地址 (可选，如 http://user:pass@host:port)
-"""
-
-import os
-import sys
-import json
-import re
-import time
-import random
-import asyncio
-from datetime import datetime, timedelta
-from typing import Optional, Dict, List
+import asyncio, json, logging, os, random, re, string, sys, time
 from dataclasses import dataclass
-import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+from urllib.parse import parse_qs, urlparse
+
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
-
-# 全局代理配置
 PROXY = os.environ.get('PROXY', '')
+HOME_URL_PATTERN = re.compile(r'business\.gemini\.google/home/cid/')
+LOGIN_URL = 'https://auth.business.gemini.google/login?continueUrl=https://business.gemini.google/'
+
+
+def parse_bool(value: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
+def build_session(pool_size: int = 10) -> requests.Session:
+    session = requests.Session()
+    adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    session.headers.update({'Connection': 'keep-alive'})
+    return session
+
+
+def maybe_apply_proxy(session: requests.Session, email_api: bool = False) -> None:
+    if email_api and not parse_bool(os.environ.get('PROXY_EMAIL', ''), False):
+        return
+    proxy = os.environ.get('PROXY', '') or PROXY
+    if proxy and not session.proxies:
+        session.proxies = {'http': proxy, 'https': proxy}
+
+
+def extract_code(content: str) -> Optional[str]:
+    if not content:
+        return None
+    cleaned = str(content).replace('=\r\n', '').replace('=\n', '').replace('=3D', '=')
+
+    contextual_patterns = [
+        r'(?:一次性验证码(?:为|是)?|验证码(?:为|是)?|verification\s*code(?:\s*is)?|one[-\s]?time\s*code(?:\s*is)?|passcode(?:\s*is)?|security\s*code(?:\s*is)?)\s*[:：]?\s*([A-Z0-9]{6,8})',
+        r'verification-code[^>]*>([A-Z0-9]{6,8})<',
+        r'>\s*([A-Z0-9]{6,8})\s*</span>',
+    ]
+    for pattern in contextual_patterns:
+        match = re.search(pattern, cleaned, re.IGNORECASE)
+        if match:
+            code = match.group(1).upper().strip()
+            if 6 <= len(code) <= 8 and code.isalnum():
+                return code
+
+    blacklist = {
+        'GEMINI', 'GOOGLE', 'VERIFY', 'CODE', 'EMAIL', 'LOGIN', 'SIGNIN',
+        'SECURE', 'ACCESS', 'NOTICE', 'PLEASE', 'TEAM', 'ACCOUNT'
+    }
+    fallback_patterns = [r'\b([A-Z0-9]{6,8})\b', r'\b(\d{6})\b']
+    for pattern in fallback_patterns:
+        for match in re.finditer(pattern, cleaned, re.IGNORECASE):
+            code = match.group(1).upper().strip()
+            if code in blacklist:
+                continue
+            if not code.isalnum():
+                continue
+            if not any(ch.isdigit() for ch in code):
+                continue
+            if 6 <= len(code) <= 8:
+                return code
+    return None
+
+
+def parse_expiration(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return None
+
+
+def random_name(length: int = 5) -> str:
+    return ''.join(random.choices(string.ascii_lowercase, k=length))
+
+
+def load_file_config() -> Dict:
+    config_path = (os.environ.get('CONFIG_PATH') or '').strip()
+    candidates = [config_path] if config_path else ['config.local.json', 'config.json']
+    for path in candidates:
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            with open(path, 'r', encoding='utf-8') as file:
+                data = json.load(file)
+            if isinstance(data, dict):
+                logger.info(f'已加载配置文件: {path}')
+                return data
+            logger.warning(f'配置文件格式不是对象: {path}')
+        except Exception as exc:
+            logger.warning(f'读取配置文件失败 {path}: {exc}')
+    return {}
+
+
+def pick_config(config_data: Dict, env_name: str, config_key: str, default=None, value_type=str):
+    env_value = os.environ.get(env_name)
+    if env_value is not None and str(env_value).strip() != '':
+        raw_value = env_value
+    elif config_key in config_data and config_data.get(config_key) not in (None, ''):
+        raw_value = config_data.get(config_key)
+    else:
+        return default
+    try:
+        if value_type is bool:
+            if isinstance(raw_value, bool):
+                return raw_value
+            return parse_bool(str(raw_value), bool(default) if default is not None else False)
+        if value_type is int:
+            return int(raw_value)
+        if value_type is float:
+            return float(raw_value)
+        if value_type is str:
+            return str(raw_value).strip()
+        return value_type(raw_value)
+    except Exception:
+        return default
 
 
 @dataclass
 class CredentialData:
-    """凭证数据"""
-    email: str = ""
-    csesidx: str = ""
-    config_id: str = ""
-    c_ses: str = ""
-    c_oses: str = ""
-    
-    def to_dict(self) -> dict:
-        """导出为同步格式"""
-        # GitHub Actions运行在UTC时区，转换为北京时间(+8)后再加12小时有效期
-        expires_at = (datetime.now() + timedelta(hours=20)).strftime("%Y-%m-%d %H:%M:%S")
-        return {
-            "id": self.email,
-            "csesidx": self.csesidx,
-            "config_id": self.config_id,
-            "secure_c_ses": self.c_ses,
-            "host_c_oses": self.c_oses,
-            "expires_at": expires_at
-        }
-    
+    email: str = ''
+    csesidx: str = ''
+    config_id: str = ''
+    c_ses: str = ''
+    c_oses: str = ''
+    mail_provider: str = ''
+    mail_address: str = ''
+    mail_password: str = ''
+    mail_base_url: str = ''
+    mail_api_key: str = ''
+    mail_domain: str = ''
+
     def is_complete(self) -> bool:
-        """检查数据是否完整"""
-        return all([self.csesidx, self.config_id, self.c_ses, self.c_oses])
+        return all([self.email, self.csesidx, self.config_id, self.c_ses, self.c_oses])
+
+    def to_dict(self, existing: Optional[Dict] = None) -> Dict:
+        payload = dict(existing or {})
+        expire_hours = int(os.environ.get('ACCOUNT_EXPIRE_HOURS', '20'))
+        payload.update({
+            'id': self.email,
+            'csesidx': self.csesidx,
+            'config_id': self.config_id,
+            'secure_c_ses': self.c_ses,
+            'host_c_oses': self.c_oses,
+            'expires_at': (datetime.now() + timedelta(hours=expire_hours)).strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        for key in ['mail_provider', 'mail_address', 'mail_password', 'mail_base_url', 'mail_api_key', 'mail_domain']:
+            value = getattr(self, key)
+            if value:
+                payload[key] = value
+        return payload
 
 
-class EmailManager:
-    """邮箱管理器"""
-    
+class BaseMailProvider:
+    provider_name = ''
+
+    def __init__(self):
+        self.session = build_session(5)
+        self.email = ''
+
+    def create_email(self) -> str:
+        raise NotImplementedError
+
+    def prepare_existing_account(self, account: Dict) -> str:
+        raise NotImplementedError
+
+    def check_verification_code(self, email: str, max_retries: int = 20, since_time: Optional[datetime] = None) -> Optional[str]:
+        raise NotImplementedError
+
+    def export_account_fields(self) -> Dict:
+        raise NotImplementedError
+
+
+class WorkerMailProvider(BaseMailProvider):
+    provider_name = 'worker'
+
     def __init__(self, worker_domain: str, email_domain: str, admin_password: str):
-        self.worker_domain = worker_domain
-        self.email_domain = email_domain
-        self.admin_password = admin_password
-        
-        # 配置Session
-        self.session = requests.Session()
-        adapter = HTTPAdapter(pool_connections=5, pool_maxsize=5)
-        self.session.mount('http://', adapter)
-        self.session.mount('https://', adapter)
-        self.session.headers.update({'Connection': 'keep-alive'})
-    
-    def _update_proxy(self):
-        """动态更新代理设置（仅在PROXY_EMAIL=true时启用）"""
-        # 邮件API默认不走代理，除非明确设置PROXY_EMAIL=true
-        use_proxy_for_email = os.environ.get('PROXY_EMAIL', '').lower() == 'true'
-        if not use_proxy_for_email:
-            return  # 邮件API不使用代理
-        
-        proxy = os.environ.get('PROXY', '') or PROXY
-        if proxy and not self.session.proxies:
-            self.session.proxies = {'http': proxy, 'https': proxy}
-            logger.info(f"EmailManager 使用代理: {proxy[:30]}...")
-    
-    def create_email(self, max_retries: int = 3) -> tuple:
-        """创建邮箱"""
-        import string
-        
-        # 动态更新代理设置
-        self._update_proxy()
-        
-        letters1 = ''.join(random.choices(string.ascii_lowercase, k=4))
-        numbers = ''.join(random.choices(string.digits, k=2))
-        letters2 = ''.join(random.choices(string.ascii_lowercase, k=3))
-        username = letters1 + numbers + letters2
-        
-        url = f"https://{self.worker_domain}/admin/new_address"
-        headers = {"Content-Type": "application/json", "x-admin-auth": self.admin_password}
-        payload = {"enablePrefix": True, "name": username, "domain": self.email_domain}
-        
-        for attempt in range(max_retries):
+        super().__init__()
+        self.worker_domain = worker_domain.strip()
+        self.email_domain = email_domain.strip()
+        self.admin_password = admin_password.strip()
+
+    def create_email(self) -> str:
+        maybe_apply_proxy(self.session, email_api=True)
+        username = f"{''.join(random.choices(string.ascii_lowercase, k=4))}{''.join(random.choices(string.digits, k=2))}{''.join(random.choices(string.ascii_lowercase, k=3))}"
+        url = f'https://{self.worker_domain}/admin/new_address'
+        headers = {'Content-Type': 'application/json', 'x-admin-auth': self.admin_password}
+        payload = {'enablePrefix': True, 'name': username, 'domain': self.email_domain}
+        for attempt in range(3):
             try:
-                res = self.session.post(url, json=payload, headers=headers, timeout=30)
-                if res.status_code == 200:
-                    data = res.json()
-                    email = data.get('address', f"{username}@{self.email_domain}")
-                    logger.info(f"邮箱创建成功: {email}")
-                    return data.get('jwt', ''), email
-            except Exception as e:
-                wait_time = (2 ** attempt) + 1
-                logger.warning(f"创建邮箱失败 ({attempt + 1}/{max_retries}): {e}")
-                time.sleep(wait_time)
-        
-        return None, None
-    
-    def check_verification_code(self, email: str, max_retries: int = 20) -> Optional[str]:
-        """检查验证码"""
-        # 动态更新代理设置
-        self._update_proxy()
-        
-        for i in range(max_retries):
+                response = self.session.post(url, json=payload, headers=headers, timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    self.email = data.get('address', f'{username}@{self.email_domain}')
+                    logger.info(f'邮箱创建成功: {self.email}')
+                    return self.email
+            except Exception as exc:
+                logger.warning(f'创建 worker 邮箱失败 ({attempt + 1}/3): {exc}')
+            time.sleep((2 ** attempt) + 1)
+        raise RuntimeError('worker 邮箱创建失败')
+
+    def prepare_existing_account(self, account: Dict) -> str:
+        self.email = (account.get('mail_address') or account.get('id') or '').strip()
+        if not self.email:
+            raise RuntimeError('缺少可刷新的邮箱地址')
+        return self.email
+
+    def check_verification_code(self, email: str, max_retries: int = 20, since_time: Optional[datetime] = None) -> Optional[str]:
+        maybe_apply_proxy(self.session, email_api=True)
+        url = f'https://{self.worker_domain}/admin/mails'
+        headers = {'x-admin-auth': self.admin_password}
+        params = {'limit': 5, 'offset': 0, 'address': email}
+        for index in range(max_retries):
             try:
-                url = f"https://{self.worker_domain}/admin/mails"
-                headers = {"x-admin-auth": self.admin_password}
-                params = {"limit": 5, "offset": 0, "address": email}
-                
-                res = self.session.get(url, params=params, headers=headers, timeout=30)
-                if res.status_code == 200:
-                    data = res.json()
-                    if data.get('results') and len(data['results']) > 0:
-                        raw_content = data['results'][0].get('raw', '')
-                        cleaned = raw_content.replace('=\r\n', '').replace('=\n', '').replace('=3D', '=')
-                        
-                        patterns = [
-                            r'verification-code[^>]*>([A-Z0-9]{6})<',
-                            r'>([A-Z0-9]{6})</span>',
-                            r'\b([A-Z0-9]{6})\b',
-                        ]
-                        for pattern in patterns:
-                            match = re.search(pattern, cleaned, re.IGNORECASE)
-                            if match:
-                                code = match.group(1).upper()
-                                if len(code) == 6 and code.isalnum():
-                                    logger.info(f"获取到验证码: {code}")
-                                    return code
-                
-                logger.info(f"等待验证码... ({i+1}/{max_retries})")
-                time.sleep(3)
-            except Exception as e:
-                logger.warning(f"检查验证码错误: {e}")
-                time.sleep(3)
-        
+                response = self.session.get(url, params=params, headers=headers, timeout=30)
+                if response.status_code == 200:
+                    for item in response.json().get('results', []) or []:
+                        code = extract_code(item.get('raw', ''))
+                        if code:
+                            logger.info(f'获取到验证码: {code}')
+                            return code
+            except Exception as exc:
+                logger.warning(f'读取 worker 验证码失败: {exc}')
+            logger.info(f'等待 worker 验证码... ({index + 1}/{max_retries})')
+            time.sleep(3)
         return None
+
+    def export_account_fields(self) -> Dict:
+        return {'mail_provider': self.provider_name, 'mail_address': self.email}
+
+
+class MoemailProvider(BaseMailProvider):
+    provider_name = 'moemail'
+
+    def __init__(self, base_url: str, api_key: str = '', domain: str = ''):
+        super().__init__()
+        self.base_url = (base_url or 'https://moemail.app').rstrip('/')
+        self.api_key = api_key.strip()
+        self.domain = domain.strip()
+        self.email_id = ''
+        self.available_domains: List[str] = []
+
+    def _request(self, method: str, url: str, **kwargs):
+        maybe_apply_proxy(self.session, email_api=True)
+        headers = dict(kwargs.pop('headers', {}) or {})
+        if self.api_key:
+            headers.setdefault('X-API-Key', self.api_key)
+        headers.setdefault('Content-Type', 'application/json')
+        return self.session.request(method, url, headers=headers, timeout=kwargs.pop('timeout', 30), **kwargs)
+
+    def _domains(self) -> List[str]:
+        if self.available_domains:
+            return self.available_domains
+        try:
+            response = self._request('GET', f'{self.base_url}/api/config')
+            if response.status_code == 200:
+                text = str(response.json().get('emailDomains', ''))
+                self.available_domains = [item.strip() for item in text.split(',') if item.strip()]
+        except Exception as exc:
+            logger.warning(f'获取 moemail 域名失败: {exc}')
+        if not self.available_domains:
+            self.available_domains = ['moemail.app']
+        return self.available_domains
+
+    def create_email(self) -> str:
+        selected_domain = self.domain or random.choice(self._domains())
+        local_part = f"t{str(int(time.time()))[-4:]}{''.join(random.choices(string.ascii_lowercase + string.digits, k=10))}"
+        response = self._request('POST', f'{self.base_url}/api/emails/generate', json={'name': local_part, 'expiryTime': 0, 'domain': selected_domain})
+        if response.status_code not in (200, 201):
+            raise RuntimeError(f'moemail 创建失败: HTTP {response.status_code}')
+        data = response.json() if response.content else {}
+        self.email = str(data.get('email') or '').strip()
+        self.email_id = str(data.get('id') or '').strip()
+        if not self.email or not self.email_id:
+            raise RuntimeError('moemail 返回缺少 email 或 id')
+        logger.info(f'Moemail 创建成功: {self.email}')
+        return self.email
+
+    def prepare_existing_account(self, account: Dict) -> str:
+        self.base_url = (account.get('mail_base_url') or self.base_url).rstrip('/')
+        self.api_key = str(account.get('mail_api_key') or self.api_key).strip()
+        self.domain = str(account.get('mail_domain') or self.domain).strip()
+        self.email = (account.get('mail_address') or account.get('id') or '').strip()
+        self.email_id = str(account.get('mail_password') or '').strip()
+        if not self.email:
+            raise RuntimeError('moemail 账号缺少邮箱地址')
+        if not self.email_id:
+            raise RuntimeError('moemail 账号缺少 email_id，无法刷新')
+        return self.email
+
+    def _message_time(self, message: Dict) -> Optional[datetime]:
+        for key in ['createdAt', 'receivedAt', 'sentAt', 'created_at', 'received_at', 'sent_at']:
+            raw_time = message.get(key)
+            if raw_time is None:
+                continue
+            if isinstance(raw_time, (int, float)):
+                timestamp = float(raw_time)
+                if timestamp > 1e12:
+                    timestamp /= 1000.0
+                return datetime.fromtimestamp(timestamp)
+            raw_text = str(raw_time).strip()
+            if raw_text.isdigit():
+                timestamp = float(raw_text)
+                if timestamp > 1e12:
+                    timestamp /= 1000.0
+                return datetime.fromtimestamp(timestamp)
+            try:
+                normalized = re.sub(r'(\.\d{6})\d+', r'\1', raw_text)
+                return datetime.fromisoformat(normalized.replace('Z', '+00:00')).astimezone().replace(tzinfo=None)
+            except Exception:
+                return None
+        return None
+
+    def _message_code(self, message: Dict, since_time: Optional[datetime]) -> Optional[str]:
+        message_time = self._message_time(message)
+        if since_time and message_time and message_time < since_time:
+            return None
+        code = extract_code(str(message.get('content') or ''))
+        if code:
+            return code
+        message_id = message.get('id')
+        if not message_id:
+            return None
+        detail = self._request('GET', f'{self.base_url}/api/emails/{self.email_id}/{message_id}')
+        if detail.status_code != 200:
+            return None
+        payload = detail.json() if detail.content else {}
+        if isinstance(payload.get('message'), dict):
+            payload = payload['message']
+        text_content = payload.get('text') or payload.get('textContent') or payload.get('content') or ''
+        html_content = payload.get('html') or payload.get('htmlContent') or ''
+        if isinstance(text_content, list):
+            text_content = ''.join(map(str, text_content))
+        if isinstance(html_content, list):
+            html_content = ''.join(map(str, html_content))
+        return extract_code(f'{text_content}{html_content}')
+
+    def check_verification_code(self, email: str, max_retries: int = 30, since_time: Optional[datetime] = None) -> Optional[str]:
+        if not self.email_id:
+            raise RuntimeError('moemail 缺少 email_id')
+        for index in range(max_retries):
+            try:
+                response = self._request('GET', f'{self.base_url}/api/emails/{self.email_id}')
+                if response.status_code == 200:
+                    messages = response.json().get('messages', []) or []
+                    messages = sorted(messages, key=lambda item: self._message_time(item) or datetime.min, reverse=True)
+                    for message in messages:
+                        code = self._message_code(message, since_time)
+                        if code:
+                            logger.info(f'获取到 moemail 验证码: {code}')
+                            return code
+            except Exception as exc:
+                logger.warning(f'读取 moemail 验证码失败: {exc}')
+            logger.info(f'等待 moemail 验证码... ({index + 1}/{max_retries})')
+            time.sleep(4)
+        return None
+
+    def export_account_fields(self) -> Dict:
+        payload = {'mail_provider': self.provider_name, 'mail_address': self.email, 'mail_password': self.email_id, 'mail_base_url': self.base_url}
+        if self.api_key:
+            payload['mail_api_key'] = self.api_key
+        if self.domain:
+            payload['mail_domain'] = self.domain
+        return payload
+
+
+def build_mail_provider(config: Dict, account: Optional[Dict] = None):
+    provider_name = str((account or {}).get('mail_provider') or config.get('email_provider') or 'worker').strip().lower()
+    if provider_name == 'moemail':
+        provider = MoemailProvider(config.get('moemail_base_url', ''), config.get('moemail_api_key', ''), config.get('moemail_domain', ''))
+    else:
+        provider = WorkerMailProvider(config.get('worker_domain', ''), config.get('email_domain', ''), config.get('admin_password', ''))
+    if account is not None:
+        provider.prepare_existing_account(account)
+    return provider
 
 
 class GeminiRegistrar:
-    """使用Playwright的注册机"""
-    
-    def __init__(self, email_config: Dict):
-        self.email_config = email_config
+    def __init__(self, mail_provider: BaseMailProvider):
+        self.mail_provider = mail_provider
         self.credential = CredentialData()
-        self.email_manager = EmailManager(
-            email_config['worker_domain'],
-            email_config['email_domain'],
-            email_config['admin_password']
-        )
-        self.browser = None
-        self.page = None
-    
-    async def register(self) -> bool:
-        """执行注册流程"""
-        from playwright.async_api import async_playwright
-        
-        try:
-            # 1. 创建邮箱
-            logger.info("正在创建邮箱...")
-            jwt, email = self.email_manager.create_email()
-            if not email:
-                raise Exception("创建邮箱失败")
-            self.credential.email = email
-            
-            # 2. 启动浏览器
-            logger.info("正在启动浏览器...")
-            async with async_playwright() as p:
-                # 配置浏览器代理
-                launch_args = {'headless': True}
-                
-                # 从环境变量读取代理（VLESS启动后会设置）
-                browser_proxy = os.environ.get('PROXY', '') or PROXY
-                if browser_proxy:
-                    # 解析代理地址
-                    from urllib.parse import urlparse
-                    proxy_parsed = urlparse(browser_proxy)
-                    # Playwright 需要的格式
-                    proxy_config = {'server': f"http://{proxy_parsed.hostname}:{proxy_parsed.port}"}
-                    if proxy_parsed.username:
-                        proxy_config['username'] = proxy_parsed.username
-                        proxy_config['password'] = proxy_parsed.password or ''
-                    launch_args['proxy'] = proxy_config
-                    logger.info(f"浏览器使用代理: {proxy_parsed.hostname}:{proxy_parsed.port}")
-                
-                self.browser = await p.chromium.launch(**launch_args)
-                context = await self.browser.new_context(
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
-                    viewport={'width': 1920, 'height': 1080}
-                )
-                self.page = await context.new_page()
-                
-                # 3. 打开注册页面
-                logger.info("正在打开注册页面...")
-                await self.page.goto('https://business.gemini.google', wait_until='networkidle')
-                
-                # 4. 输入邮箱
-                logger.info(f"正在输入邮箱: {email}")
-                await self.page.wait_for_selector('#email-input', timeout=30000)
-                await self.page.fill('#email-input', email)
-                await asyncio.sleep(1)
-                
-                # 5. 点击继续
-                await self.page.click('#log-in-button')
-                await asyncio.sleep(2)
-                
-                # 6. 获取验证码
-                logger.info("正在等待验证码...")
-                code = self.email_manager.check_verification_code(email)
-                if not code:
-                    raise Exception("未收到验证码")
-                
-                # 7. 输入验证码
-                logger.info(f"正在输入验证码: {code}")
-                await self.page.wait_for_selector('input[name="pinInput"]', timeout=30000)
-                await self.page.fill('input[name="pinInput"]', code)
-                await asyncio.sleep(1)
-                
-                # 8. 点击验证
-                await self.page.click('button[jsname="XooR8e"]')
-                await asyncio.sleep(3)
-                
-                # 9. 输入姓名
-                logger.info("正在输入姓名...")
-                await self.page.wait_for_selector('input[formcontrolname="fullName"]', timeout=15000)
-                fullname = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5))
-                await self.page.fill('input[formcontrolname="fullName"]', fullname)
-                await asyncio.sleep(1)
-                
-                # 10. 点击同意
-                await self.page.click('button.agree-button')
-                
-                # 11. 等待跳转
-                logger.info("正在等待页面跳转...")
-                await self.page.wait_for_url(re.compile(r'business\.gemini\.google/home/cid/'), timeout=90000)
-                await asyncio.sleep(3)
-                
-                # 12. 提取数据
-                logger.info("正在提取凭证数据...")
-                cookies = await context.cookies()
-                for cookie in cookies:
-                    if cookie['name'] == '__Host-C_OSES':
-                        self.credential.c_oses = cookie['value']
-                    elif cookie['name'] == '__Secure-C_SES':
-                        self.credential.c_ses = cookie['value']
-                
-                current_url = self.page.url
-                from urllib.parse import urlparse, parse_qs
-                parsed = urlparse(current_url)
-                self.credential.csesidx = parse_qs(parsed.query).get('csesidx', [''])[0]
-                
-                path_match = re.search(r'/cid/([a-f0-9-]+)', parsed.path)
-                if path_match:
-                    self.credential.config_id = path_match.group(1)
-                
-                if self.credential.is_complete():
-                    logger.info(f"✅ 注册成功! 邮箱: {email}")
+
+    def _build_launch_args(self) -> Dict:
+        headless = parse_bool(os.environ.get('BROWSER_HEADLESS', 'true'), True)
+        slow_mo_ms = int(os.environ.get('BROWSER_SLOW_MO_MS', '0') or '0')
+        launch_args = {'headless': headless}
+        if slow_mo_ms > 0:
+            launch_args['slow_mo'] = slow_mo_ms
+        browser_proxy = os.environ.get('PROXY', '') or PROXY
+        if browser_proxy:
+            parsed_proxy = urlparse(browser_proxy)
+            proxy_config = {'server': f'http://{parsed_proxy.hostname}:{parsed_proxy.port}'}
+            if parsed_proxy.username:
+                proxy_config['username'] = parsed_proxy.username
+                proxy_config['password'] = parsed_proxy.password or ''
+            launch_args['proxy'] = proxy_config
+        return launch_args
+
+    @staticmethod
+    def _playwright_install_hint() -> str:
+        return '请先执行: python -m playwright install chromium'
+
+    async def _find_code_input(self, page):
+        selectors = ['input[name="pinInput"]', "input[jsname='ovqh0b']", "input[type='tel']"]
+        for selector in selectors:
+            locator = page.locator(selector)
+            try:
+                if await locator.count() > 0 and await locator.first.is_visible():
+                    return locator.first
+            except Exception:
+                continue
+        return None
+
+    async def _wait_for_code_input(self, page, timeout_ms: int = 30000) -> bool:
+        selectors = ['input[name="pinInput"]', "input[jsname='ovqh0b']", "input[type='tel']"]
+        deadline = time.time() + (timeout_ms / 1000)
+        while time.time() < deadline:
+            for selector in selectors:
+                try:
+                    await page.wait_for_selector(selector, timeout=1500)
                     return True
-                else:
-                    raise Exception("未能获取完整凭证数据")
-                    
-        except Exception as e:
-            logger.error(f"❌ 注册失败: {e}")
+                except Exception:
+                    pass
+            await asyncio.sleep(1)
+        return False
+
+    async def _click_resend_code_button(self, page) -> bool:
+        candidates = [
+            'button:has-text("重新发送")',
+            'button:has-text("重发")',
+            'button:has-text("Resend")',
+            'button:has-text("resend")',
+            'button:has-text("Send again")',
+        ]
+        for selector in candidates:
+            locator = page.locator(selector)
+            try:
+                if await locator.count() > 0 and await locator.first.is_visible():
+                    await locator.first.click()
+                    return True
+            except Exception:
+                continue
+        try:
+            buttons = page.locator('button')
+            count = await buttons.count()
+            for index in range(min(count, 20)):
+                button = buttons.nth(index)
+                text = ((await button.text_content()) or '').strip().lower()
+                if 'resend' in text or '重新' in text or '重发' in text:
+                    await button.click()
+                    return True
+        except Exception:
+            pass
+        return False
+
+    async def execute(self, existing_account: Optional[Dict] = None) -> bool:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
+        try:
+            async with async_playwright() as playwright:
+                launch_args = self._build_launch_args()
+                try:
+                    browser = await playwright.chromium.launch(**launch_args)
+                except Exception as exc:
+                    message = str(exc)
+                    if 'Executable doesn\'t exist' in message or 'Executable doesn\u2019t exist' in message:
+                        raise RuntimeError(f'Playwright 浏览器未安装。{self._playwright_install_hint()}') from exc
+                    raise
+
+                email = self.mail_provider.prepare_existing_account(existing_account) if existing_account else self.mail_provider.create_email()
+                account_fields = self.mail_provider.export_account_fields()
+                self.credential.email = email
+                self.credential.mail_provider = account_fields.get('mail_provider', '')
+                self.credential.mail_address = account_fields.get('mail_address', email)
+                self.credential.mail_password = account_fields.get('mail_password', '')
+                self.credential.mail_base_url = account_fields.get('mail_base_url', '')
+                self.credential.mail_api_key = account_fields.get('mail_api_key', '')
+                self.credential.mail_domain = account_fields.get('mail_domain', '')
+                context = await browser.new_context(user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36', viewport={'width': 1920, 'height': 1080})
+                page = await context.new_page()
+                try:
+                    await page.goto(LOGIN_URL, wait_until='domcontentloaded', timeout=90000)
+                    await page.wait_for_selector('#email-input', timeout=30000)
+                    await page.fill('#email-input', email)
+                    await asyncio.sleep(1)
+                    poll_since_time = datetime.now() - timedelta(seconds=30)
+                    await page.locator('#log-in-button').click(force=True)
+                    await asyncio.sleep(2)
+                    if not await self._wait_for_code_input(page, timeout_ms=30000):
+                        raise RuntimeError(f'验证码输入框未出现，当前页面: {page.url}')
+
+                    code = self.mail_provider.check_verification_code(email, max_retries=6, since_time=poll_since_time)
+                    if not code:
+                        logger.warning('首次轮询未收到验证码，尝试重发一次')
+                        if await self._click_resend_code_button(page):
+                            await asyncio.sleep(2)
+                            code = self.mail_provider.check_verification_code(email, max_retries=8, since_time=poll_since_time)
+                    if not code:
+                        raise RuntimeError('未收到验证码')
+                    code_input = await self._find_code_input(page)
+                    if not code_input:
+                        raise RuntimeError('验证码输入框已失效')
+                    await code_input.fill(code)
+                    await asyncio.sleep(1)
+                    await page.click('button[jsname="XooR8e"]')
+                    await asyncio.sleep(3)
+                    await self.finish_login(page)
+                    for cookie in await context.cookies():
+                        if cookie.get('name') == '__Host-C_OSES':
+                            self.credential.c_oses = cookie.get('value', '')
+                        elif cookie.get('name') == '__Secure-C_SES':
+                            self.credential.c_ses = cookie.get('value', '')
+                    parsed_url = urlparse(page.url)
+                    self.credential.csesidx = parse_qs(parsed_url.query).get('csesidx', [''])[0]
+                    match = re.search(r'/cid/([a-f0-9-]+)', parsed_url.path)
+                    if match:
+                        self.credential.config_id = match.group(1)
+                    if not self.credential.is_complete():
+                        raise RuntimeError('未能提取完整凭证')
+                    logger.info(f'账号处理成功: {email}')
+                    return True
+                finally:
+                    await context.close()
+                    await browser.close()
+        except PlaywrightTimeoutError as exc:
+            logger.error(f'页面等待超时: {exc}')
             return False
+        except Exception as exc:
+            logger.error(f'账号处理失败: {exc}')
+            return False
+
+    async def finish_login(self, page) -> None:
+        for _ in range(20):
+            if HOME_URL_PATTERN.search(page.url):
+                return
+            locator = page.locator('input[formcontrolname="fullName"]')
+            if await locator.count() > 0 and await locator.first.is_visible():
+                await locator.first.fill(random_name())
+                await asyncio.sleep(1)
+                agree = page.locator('button.agree-button')
+                if await agree.count() > 0 and await agree.first.is_visible():
+                    await agree.first.click()
+            await asyncio.sleep(2)
+        await page.wait_for_url(HOME_URL_PATTERN, timeout=90000)
 
 
 class CredentialSyncer:
-    """凭证同步器"""
-    
     def __init__(self, base_url: str, admin_key: str):
         self.base_url = base_url.rstrip('/')
         self.admin_key = admin_key
-        self.session = requests.Session()
-        adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10)
-        self.session.mount('http://', adapter)
-        self.session.mount('https://', adapter)
-        self.session.headers.update({'Connection': 'keep-alive'})
-    
-    def _update_proxy(self):
-        """动态更新代理设置"""
-        proxy = os.environ.get('PROXY', '') or PROXY
-        if proxy and not self.session.proxies:
-            self.session.proxies = {'http': proxy, 'https': proxy}
-            logger.info(f"CredentialSyncer 使用代理: {proxy[:30]}...")
-    
-    def _request(self, method: str, url: str, **kwargs):
-        """带重试的请求"""
-        self._update_proxy()  # 动态更新代理
+        self.session = build_session(10)
+
+    def request(self, method: str, path: str, **kwargs):
+        maybe_apply_proxy(self.session, email_api=False)
+        url = f'{self.base_url}{path}'
         for attempt in range(3):
             try:
-                return getattr(self.session, method)(url, timeout=30, **kwargs)
-            except Exception as e:
+                return self.session.request(method, url, timeout=30, **kwargs)
+            except Exception:
                 if attempt == 2:
                     raise
                 time.sleep((2 ** attempt) + 1)
-        return None
-    
-    def sync(self, new_accounts: List[Dict]) -> bool:
-        """执行同步"""
-        try:
-            # 1. 登录
-            logger.info("步骤 1/4: 登录...")
-            res = self._request('post', f"{self.base_url}/login", 
-                data={'admin_key': self.admin_key},
-                headers={'Content-Type': 'application/x-www-form-urlencoded'})
-            if res.status_code != 200:
-                logger.error(f"登录失败: {res.status_code}")
-                return False
-            logger.info("✅ 登录成功")
-            
-            # 2. 获取现有凭证
-            logger.info("步骤 2/4: 获取现有凭证...")
-            res = self._request('get', f"{self.base_url}/admin/accounts-config")
-            existing = res.json().get('accounts', []) if res.status_code == 200 else []
-            logger.info(f"获取到 {len(existing)} 个现有账户")
-            
-            # 3. 合并凭证
-            logger.info("步骤 3/4: 合并凭证...")
-            accounts_dict = {a['id']: a for a in existing if a.get('id')}
-            for account in new_accounts:
-                if account.get('id'):
-                    accounts_dict[account['id']] = account
-            merged = list(accounts_dict.values())
-            logger.info(f"合并后共 {len(merged)} 个账户")
-            
-            # 4. 上传
-            logger.info("步骤 4/4: 上传凭证...")
-            res = self._request('put', f"{self.base_url}/admin/accounts-config",
-                json=merged, headers={'Content-Type': 'application/json'})
-            if res.status_code == 200:
-                logger.info(f"✅ 上传成功!")
-                return True
+        raise RuntimeError('request failed')
+
+    def login(self) -> bool:
+        response = self.request('POST', '/login', data={'admin_key': self.admin_key}, headers={'Content-Type': 'application/x-www-form-urlencoded'})
+        if response.status_code != 200:
+            if response.status_code == 401:
+                logger.error('登录 gemini-business2api 失败: HTTP 401，SYNC_KEY 必须等于远端 gemini-business2api 的 ADMIN_KEY')
             else:
-                logger.error(f"上传失败: {res.status_code}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"同步失败: {e}")
+                logger.error(f'登录 gemini-business2api 失败: HTTP {response.status_code}')
             return False
+        return True
+
+    def fetch_accounts(self) -> List[Dict]:
+        response = self.request('GET', '/admin/accounts-config')
+        if response.status_code != 200:
+            raise RuntimeError(f'拉取账号配置失败: HTTP {response.status_code}')
+        return response.json().get('accounts', []) or []
+
+    def upload_accounts(self, accounts: List[Dict]) -> bool:
+        response = self.request('PUT', '/admin/accounts-config', json=accounts, headers={'Content-Type': 'application/json'})
+        if response.status_code != 200:
+            logger.error(f'上传账号配置失败: HTTP {response.status_code}')
+            return False
+        return True
+
+    @staticmethod
+    def merge_accounts(existing: List[Dict], updates: List[Dict]) -> List[Dict]:
+        merged = [dict(item) for item in existing]
+        index_map = {item.get('id'): index for index, item in enumerate(merged) if item.get('id')}
+        for update in updates:
+            account_id = update.get('id')
+            if not account_id:
+                continue
+            if account_id in index_map:
+                merged[index_map[account_id]].update(update)
+            else:
+                index_map[account_id] = len(merged)
+                merged.append(dict(update))
+        return merged
+
+    def sync(self, new_accounts: List[Dict]) -> bool:
+        if not self.login():
+            return False
+        existing = self.fetch_accounts()
+        merged = self.merge_accounts(existing, new_accounts)
+        logger.info(f'同步账号数量: 现有 {len(existing)} / 更新后 {len(merged)}')
+        return self.upload_accounts(merged)
 
 
-async def register_worker(worker_id: int, email_config: Dict) -> Optional[Dict]:
-    """注册工作函数"""
-    logger.info(f"[Worker-{worker_id}] 开始注册...")
-    registrar = GeminiRegistrar(email_config)
-    
-    if await registrar.register():
-        cred = registrar.credential.to_dict()
-        logger.info(f"[Worker-{worker_id}] ✅ 成功: {cred['id']}")
-        return cred
-    else:
-        logger.info(f"[Worker-{worker_id}] ❌ 失败")
+def validate_config(config: Dict, run_mode: str) -> None:
+    if config.get('email_provider') == 'moemail':
+        if not config.get('moemail_base_url'):
+            config['moemail_base_url'] = 'https://moemail.app'
+    elif not all([config.get('worker_domain'), config.get('email_domain'), config.get('admin_password')]):
+        logger.error('缺少 worker 邮箱配置')
+        sys.exit(1)
+    if run_mode in {'register', 'refresh', 'both'} and (not config.get('sync_url') or not config.get('sync_key')):
+        logger.error('缺少 gemini-business2api 同步配置')
+        sys.exit(1)
+
+
+async def process_register(worker_id: int, config: Dict) -> Optional[Dict]:
+    logger.info(f'[Register-{worker_id}] 开始处理')
+    registrar = GeminiRegistrar(build_mail_provider(config))
+    if await registrar.execute():
+        payload = registrar.credential.to_dict()
+        logger.info(f"[Register-{worker_id}] 成功: {payload['id']}")
+        return payload
+    logger.info(f'[Register-{worker_id}] 失败')
+    return None
+
+
+def should_refresh(account: Dict, refresh_before_hours: float, include_disabled: bool) -> bool:
+    if not account.get('id'):
+        return False
+    if account.get('disabled') and not include_disabled:
+        return False
+    expires_at = parse_expiration(account.get('expires_at'))
+    if expires_at is None:
+        return False
+    return expires_at <= datetime.now() + timedelta(hours=refresh_before_hours)
+
+
+async def process_refresh(account: Dict, config: Dict) -> Optional[Dict]:
+    provider_name = str(account.get('mail_provider') or config.get('email_provider') or 'worker').strip().lower()
+    if provider_name not in {'worker', 'moemail'}:
+        logger.info(f"跳过不支持刷新的账号: {account.get('id')} ({provider_name})")
         return None
+    registrar = GeminiRegistrar(build_mail_provider(config, account=account))
+    if await registrar.execute(existing_account=account):
+        payload = registrar.credential.to_dict(existing=account)
+        logger.info(f"刷新成功: {payload['id']}")
+        return payload
+    logger.warning(f"刷新失败: {account.get('id')}")
+    return None
 
 
-async def main():
-    global PROXY  # 允许proxy_helper更新全局代理
-    
-    # 启动VLESS代理（如果配置了）
-    proxy_process = None
-    vless_config = os.environ.get('VLESS_CONFIG', '')
+async def run_register_flow(config: Dict) -> List[Dict]:
+    count = int(config.get('register_count', 1))
+    concurrent = max(1, int(config.get('concurrent', 1)))
+    logger.info(f"注册模式启动: count={count}, concurrent={concurrent}, provider={config.get('email_provider')}")
+    if concurrent == 1:
+        results: List[Dict] = []
+        for index in range(count):
+            item = await process_register(index + 1, config)
+            if item:
+                results.append(item)
+            if index < count - 1:
+                await asyncio.sleep(random.randint(3, 6))
+        return results
+    tasks = [process_register(index + 1, config) for index in range(count)]
+    completed = await asyncio.gather(*tasks, return_exceptions=True)
+    return [item for item in completed if isinstance(item, dict)]
+
+
+async def run_refresh_flow(config: Dict, syncer: CredentialSyncer) -> List[Dict]:
+    if not syncer.login():
+        raise RuntimeError('登录 gemini-business2api 失败，无法刷新账号；请检查 sync_key 是否与远端 ADMIN_KEY 一致')
+    existing_accounts = syncer.fetch_accounts()
+    refresh_before_hours = float(config.get('refresh_before_hours', 0))
+    refresh_limit = int(config.get('refresh_limit', 0))
+    include_disabled = bool(config.get('refresh_include_disabled', False))
+    candidates = [account for account in existing_accounts if should_refresh(account, refresh_before_hours, include_disabled)]
+    if refresh_limit > 0:
+        candidates = candidates[:refresh_limit]
+    logger.info(f'待刷新账号数量: {len(candidates)}')
+    refreshed: List[Dict] = []
+    for index, account in enumerate(candidates, start=1):
+        logger.info(f"[{index}/{len(candidates)}] 正在刷新: {account.get('id')}")
+        updated = await process_refresh(account, config)
+        if updated:
+            refreshed.append(updated)
+        if index < len(candidates):
+            await asyncio.sleep(5)
+    if refreshed:
+        merged = CredentialSyncer.merge_accounts(existing_accounts, refreshed)
+        if not syncer.upload_accounts(merged):
+            raise RuntimeError('刷新后的账号上传失败')
+    return refreshed
+
+
+async def main() -> None:
+    global PROXY
+    file_config = load_file_config()
+    for env_name, config_key in [
+        ('PROXY', 'proxy'),
+        ('PROXY_EMAIL', 'proxy_email'),
+        ('VLESS_CONFIG', 'vless_config'),
+        ('ACCOUNT_EXPIRE_HOURS', 'account_expire_hours'),
+        ('BROWSER_HEADLESS', 'browser_headless'),
+        ('BROWSER_SLOW_MO_MS', 'browser_slow_mo_ms'),
+    ]:
+        if os.environ.get(env_name, '').strip() == '' and file_config.get(config_key) not in (None, ''):
+            os.environ[env_name] = str(file_config.get(config_key))
+    PROXY = os.environ.get('PROXY', '') or str(file_config.get('proxy') or '')
+    vless_config = os.environ.get('VLESS_CONFIG', '').strip()
     if vless_config:
         try:
             from proxy_helper import setup_proxy
-            logger.info("正在启动VLESS代理...")
+            logger.info('正在启动 VLESS 代理...')
             proxy_process = setup_proxy()
             if proxy_process:
-                # 更新全局PROXY变量
                 PROXY = os.environ.get('PROXY', '')
-                logger.info(f"VLESS代理已启动: {PROXY}")
-        except Exception as e:
-            logger.warning(f"VLESS代理启动失败: {e}")
-    
-    # 从环境变量读取配置
-    email_config = {
-        'worker_domain': os.environ.get('WORKER_DOMAIN', ''),
-        'email_domain': os.environ.get('EMAIL_DOMAIN', ''),
-        'admin_password': os.environ.get('ADMIN_PASSWORD', '')
+                logger.info(f'VLESS 代理已启用: {PROXY}')
+        except Exception as exc:
+            logger.warning(f'VLESS 代理启动失败: {exc}')
+    config = {
+        'run_mode': (pick_config(file_config, 'RUN_MODE', 'run_mode', 'register', str) or 'register').lower(),
+        'email_provider': (pick_config(file_config, 'EMAIL_PROVIDER', 'email_provider', 'worker', str) or 'worker').lower(),
+        'worker_domain': pick_config(file_config, 'WORKER_DOMAIN', 'worker_domain', '', str),
+        'email_domain': pick_config(file_config, 'EMAIL_DOMAIN', 'email_domain', '', str),
+        'admin_password': pick_config(file_config, 'ADMIN_PASSWORD', 'admin_password', '', str),
+        'moemail_base_url': pick_config(file_config, 'MOEMAIL_BASE_URL', 'moemail_base_url', 'https://moemail.app', str),
+        'moemail_api_key': pick_config(file_config, 'MOEMAIL_API_KEY', 'moemail_api_key', '', str),
+        'moemail_domain': pick_config(file_config, 'MOEMAIL_DOMAIN', 'moemail_domain', '', str),
+        'sync_url': pick_config(file_config, 'SYNC_URL', 'sync_url', '', str),
+        'sync_key': pick_config(file_config, 'SYNC_KEY', 'sync_key', '', str),
+        'register_count': pick_config(file_config, 'REGISTER_COUNT', 'register_count', 1, int),
+        'concurrent': pick_config(file_config, 'CONCURRENT', 'concurrent', 1, int),
+        'refresh_before_hours': pick_config(file_config, 'REFRESH_BEFORE_HOURS', 'refresh_before_hours', 0.0, float),
+        'refresh_limit': pick_config(file_config, 'REFRESH_LIMIT', 'refresh_limit', 0, int),
+        'refresh_include_disabled': pick_config(file_config, 'REFRESH_INCLUDE_DISABLED', 'refresh_include_disabled', False, bool),
     }
-    
-    sync_url = os.environ.get('SYNC_URL', '')
-    sync_key = os.environ.get('SYNC_KEY', '')
-    count = int(os.environ.get('REGISTER_COUNT', '1'))
-    concurrent = int(os.environ.get('CONCURRENT', '1'))
-    
-    # 验证配置
-    if not all([email_config['worker_domain'], email_config['email_domain'], email_config['admin_password']]):
-        logger.error("❌ 缺少邮箱配置环境变量!")
-        sys.exit(1)
-    
-    if not sync_url or not sync_key:
-        logger.error("❌ 缺少同步API配置!")
-        sys.exit(1)
-    
-    print(f"\n{'='*50}")
-    print(f"  Gemini Business 注册机 (GitHub Actions)")
-    print(f"  计划注册: {count} 个账号")
-    print(f"  并发数: {concurrent}")
-    print(f"{'='*50}\n")
-    
-    # 执行注册
-    credentials = []
-    
-    if concurrent == 1:
-        # 串行
-        for i in range(count):
-            cred = await register_worker(i + 1, email_config)
-            if cred:
-                credentials.append(cred)
-            if i < count - 1:
-                await asyncio.sleep(random.randint(3, 6))
-    else:
-        # 并发
-        tasks = [register_worker(i + 1, email_config) for i in range(count)]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        credentials = [r for r in results if isinstance(r, dict)]
-    
-    print(f"\n注册完成: 成功 {len(credentials)} 个\n")
-    
-    # 同步到远程
-    if credentials:
-        print("开始同步到远程API...\n")
-        syncer = CredentialSyncer(sync_url, sync_key)
-        if syncer.sync(credentials):
-            print("\n✅ 全部完成!")
-        else:
-            print("\n❌ 同步失败!")
-            sys.exit(1)
-    else:
-        print("没有成功注册的账号，跳过同步")
+    validate_config(config, config['run_mode'])
+    print(f"\n{'=' * 56}")
+    print('  GeminiForge')
+    print(f"  mode: {config['run_mode']}")
+    print(f"  provider: {config['email_provider']}")
+    print(f"  register_count: {config['register_count']}")
+    print(f"  concurrent: {config['concurrent']}")
+    print(f"{'=' * 56}\n")
+    syncer = CredentialSyncer(config['sync_url'], config['sync_key'])
+    refreshed_accounts: List[Dict] = []
+    new_accounts: List[Dict] = []
+    if config['run_mode'] in {'refresh', 'both'}:
+        refreshed_accounts = await run_refresh_flow(config, syncer)
+        logger.info(f'刷新完成: {len(refreshed_accounts)} 个')
+    if config['run_mode'] in {'register', 'both'}:
+        new_accounts = await run_register_flow(config)
+        logger.info(f'注册完成: {len(new_accounts)} 个')
+        if new_accounts:
+            logger.info('开始同步新注册账号到 gemini-business2api...')
+            if not syncer.sync(new_accounts):
+                sys.exit(1)
+    if not refreshed_accounts and not new_accounts:
+        logger.info('本次没有可上传或可刷新的账号')
 
 
 if __name__ == '__main__':

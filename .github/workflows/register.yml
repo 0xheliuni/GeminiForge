@@ -3,6 +3,16 @@ name: Gemini Business Account Registration
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: '运行模式: register / refresh / both'
+        required: true
+        default: 'both'
+        type: string
+      mail_provider:
+        description: '邮箱提供商: worker / moemail'
+        required: true
+        default: 'moemail'
+        type: string
       count:
         description: '注册账号数量'
         required: true
@@ -13,58 +23,77 @@ on:
         required: true
         default: '1'
         type: string
+      refresh_before_hours:
+        description: '提前多少小时刷新，0 仅刷新已过期账号'
+        required: true
+        default: '0'
+        type: string
   schedule:
-    # 每6小时运行一次 (UTC 00:00, 06:00, 12:00, 18:00)
     - cron: '0 */6 * * *'
 
 env:
+  CONFIG_PATH: config.json
+  CONFIG_JSON: ${{ secrets.CONFIG_JSON }}
+  RUN_MODE: ${{ github.event.inputs.mode || 'both' }}
+  EMAIL_PROVIDER: ${{ github.event.inputs.mail_provider || secrets.EMAIL_PROVIDER || 'moemail' }}
   WORKER_DOMAIN: ${{ secrets.WORKER_DOMAIN }}
   EMAIL_DOMAIN: ${{ secrets.EMAIL_DOMAIN }}
   ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+  MOEMAIL_BASE_URL: ${{ secrets.MOEMAIL_BASE_URL }}
+  MOEMAIL_API_KEY: ${{ secrets.MOEMAIL_API_KEY }}
+  MOEMAIL_DOMAIN: ${{ secrets.MOEMAIL_DOMAIN }}
   SYNC_URL: ${{ secrets.SYNC_URL }}
   SYNC_KEY: ${{ secrets.SYNC_KEY }}
   PROXY: ${{ secrets.PROXY }}
   VLESS_CONFIG: ${{ secrets.VLESS_CONFIG }}
+  REFRESH_BEFORE_HOURS: ${{ github.event.inputs.refresh_before_hours || secrets.REFRESH_BEFORE_HOURS || '0' }}
+  REFRESH_LIMIT: ${{ secrets.REFRESH_LIMIT }}
+  REFRESH_INCLUDE_DISABLED: ${{ secrets.REFRESH_INCLUDE_DISABLED }}
 
 jobs:
   register:
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: 检出代码
+      - name: Checkout
         uses: actions/checkout@v4
-      
-      - name: 设置 Python
+
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
-      - name: 安装 sing-box (如果配置了VLESS)
+
+      - name: Install sing-box
         if: ${{ env.VLESS_CONFIG != '' }}
         run: |
-          echo "正在安装 sing-box..."
           curl -Lo sing-box.tar.gz https://github.com/SagerNet/sing-box/releases/download/v1.8.0/sing-box-1.8.0-linux-amd64.tar.gz
           tar -xzf sing-box.tar.gz
           sudo mv sing-box-*/sing-box /usr/local/bin/
           sing-box version
-      
-      - name: 安装 Python 依赖
+
+      - name: Install Python dependencies
         run: |
           pip install playwright requests
           playwright install chromium
           playwright install-deps chromium
-      
-      - name: 运行注册机
+
+      - name: Write config file from secret
+        if: ${{ env.CONFIG_JSON != '' }}
+        shell: bash
+        run: |
+          printf '%s' "$CONFIG_JSON" > "$CONFIG_PATH"
+          echo "config file written: $CONFIG_PATH"
+
+      - name: Run GeminiForge
         env:
-          # 手动触发使用输入值，定时触发默认注册2个账号
           REGISTER_COUNT: ${{ github.event.inputs.count || '2' }}
           CONCURRENT: ${{ github.event.inputs.concurrent || '1' }}
         run: python register.py
-      
-      - name: 保存日志
+
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: registration-log-${{ github.run_number }}
-          path: "*.log"
+          path: '*.log'
           retention-days: 7
