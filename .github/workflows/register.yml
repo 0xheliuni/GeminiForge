@@ -45,7 +45,10 @@ env:
   SYNC_URL: ${{ secrets.SYNC_URL }}
   SYNC_KEY: ${{ secrets.SYNC_KEY }}
   PROXY: ${{ secrets.PROXY }}
+  PROXY_EMAIL: ${{ secrets.PROXY_EMAIL || 'false' }}
   VLESS_CONFIG: ${{ secrets.VLESS_CONFIG }}
+  BROWSER_HEADLESS: ${{ secrets.BROWSER_HEADLESS || 'true' }}
+  BROWSER_SLOW_MO_MS: ${{ secrets.BROWSER_SLOW_MO_MS || '0' }}
   REFRESH_BEFORE_HOURS: ${{ github.event.inputs.refresh_before_hours || secrets.REFRESH_BEFORE_HOURS || '0' }}
   REFRESH_LIMIT: ${{ secrets.REFRESH_LIMIT }}
   REFRESH_INCLUDE_DISABLED: ${{ secrets.REFRESH_INCLUDE_DISABLED }}
@@ -84,11 +87,51 @@ jobs:
           printf '%s' "$CONFIG_JSON" > "$CONFIG_PATH"
           echo "config file written: $CONFIG_PATH"
 
+      - name: Show direct egress IP
+        shell: bash
+        run: |
+          echo "Direct IP:"
+          curl -s https://api.ipify.org || true
+          echo
+
+      - name: Show configured runtime flags
+        shell: bash
+        run: |
+          echo "BROWSER_HEADLESS=$BROWSER_HEADLESS"
+          echo "BROWSER_SLOW_MO_MS=$BROWSER_SLOW_MO_MS"
+          echo "PROXY_EMAIL=$PROXY_EMAIL"
+          if [ -n "$PROXY" ]; then
+            echo "PROXY is set"
+          else
+            echo "PROXY is not set"
+          fi
+          if [ -n "$VLESS_CONFIG" ]; then
+            echo "VLESS_CONFIG is set"
+          else
+            echo "VLESS_CONFIG is not set"
+          fi
+
+      - name: Show configured proxy egress IP
+        if: ${{ env.PROXY != '' }}
+        shell: bash
+        run: |
+          echo "Proxy IP via configured PROXY:"
+          curl -s --proxy "$PROXY" https://api.ipify.org || true
+          echo
+
       - name: Run GeminiForge
         env:
           REGISTER_COUNT: ${{ github.event.inputs.count || '2' }}
           CONCURRENT: ${{ github.event.inputs.concurrent || '1' }}
-        run: python register.py
+        shell: bash
+        run: |
+          if [ "$BROWSER_HEADLESS" = "false" ]; then
+            echo "Running GeminiForge with xvfb-run (headed debug mode)"
+            xvfb-run -a python register.py
+          else
+            echo "Running GeminiForge in headless mode"
+            python register.py
+          fi
 
       - name: Upload logs
         if: always()
