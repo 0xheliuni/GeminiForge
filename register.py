@@ -1138,7 +1138,17 @@ async def run_register_flow(config: Dict, syncer: CredentialSyncer) -> List[Dict
             if index < count - 1:
                 await asyncio.sleep(random.randint(3, 6))
         return results
-    tasks = [process_register(index + 1, config) for index in range(count)]
+
+    semaphore = asyncio.Semaphore(concurrent)
+
+    async def limited_process_register(worker_id: int) -> Optional[Dict]:
+        async with semaphore:
+            return await process_register(worker_id, config)
+
+    tasks = [
+        asyncio.create_task(limited_process_register(index + 1))
+        for index in range(count)
+    ]
     results: List[Dict] = []
     for completed in asyncio.as_completed(tasks):
         item = await completed
