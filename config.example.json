@@ -18,6 +18,7 @@
   "browser_headless": true,
   "browser_slow_mo_ms": 0,
   "proxy": "",
+  "proxy_pool": [],
   "proxy_email": false,
   "vless_config": ""
 }

@@ -45,6 +45,7 @@ env:
   SYNC_URL: ${{ secrets.SYNC_URL }}
   SYNC_KEY: ${{ secrets.SYNC_KEY }}
   PROXY: ${{ secrets.PROXY }}
+  PROXY_POOL: ${{ secrets.PROXY_POOL }}
   PROXY_EMAIL: ${{ secrets.PROXY_EMAIL || 'false' }}
   VLESS_CONFIG: ${{ secrets.VLESS_CONFIG }}
   BROWSER_HEADLESS: ${{ secrets.BROWSER_HEADLESS || 'true' }}
@@ -76,7 +77,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install playwright requests
+          pip install playwright requests playwright-stealth faker
           playwright install chromium
           playwright install-deps chromium
 
