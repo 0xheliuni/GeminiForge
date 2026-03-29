@@ -43,20 +43,16 @@ except ImportError:
 
 
 CHROME_VERSIONS = [
-    "120.0.0.0",
-    "121.0.0.0",
-    "122.0.0.0",
-    "123.0.0.0",
-    "124.0.0.0",
-    "125.0.0.0",
-    "126.0.0.0",
-    "127.0.0.0",
-    "128.0.0.0",
-    "129.0.0.0",
-    "130.0.0.0",
-    "131.0.0.0",
-    "132.0.0.0",
-    "133.0.0.0",
+    "128.0.6613.120",
+    "129.0.6668.89",
+    "130.0.6723.91",
+    "131.0.6778.108",
+    "132.0.6834.83",
+    "133.0.6943.127",
+    "134.0.6998.89",
+    "134.0.6998.117",
+    "135.0.7049.52",
+    "135.0.7049.84",
 ]
 
 VIEWPORT_PRESETS = [
@@ -70,20 +66,99 @@ VIEWPORT_PRESETS = [
     {"width": 1600, "height": 900},
 ]
 
-LOCALE_TZ_PAIRS = [
-    ("en-US", "America/New_York"),
-    ("en-US", "America/Chicago"),
-    ("en-US", "America/Denver"),
-    ("en-US", "America/Los_Angeles"),
-    ("en-GB", "Europe/London"),
-    ("en-AU", "Australia/Sydney"),
-    ("en-CA", "America/Toronto"),
-]
+DEVICE_SCALE_FACTORS = [1, 1, 1, 1.25, 1.5, 2]
 
-PLATFORM_UA_TEMPLATES = [
-    ("Windows NT 10.0; Win64; x64", "Chrome/{ver} Safari/537.36"),
-    ("Macintosh; Intel Mac OS X 10_15_7", "Chrome/{ver} Safari/537.36"),
-    ("X11; Linux x86_64", "Chrome/{ver} Safari/537.36"),
+COLOR_SCHEMES = ["light", "dark", "no-preference"]
+
+FINGERPRINT_PROFILES = [
+    {
+        "locale": "en-US",
+        "timezone_id": "America/New_York",
+        "geolocation": {"latitude": 40.7128, "longitude": -74.0060},
+        "accept_language": "en-US,en;q=0.9",
+        "platforms": [
+            "Windows NT 10.0; Win64; x64",
+            "Macintosh; Intel Mac OS X 10_15_7",
+        ],
+    },
+    {
+        "locale": "en-US",
+        "timezone_id": "America/Chicago",
+        "geolocation": {"latitude": 41.8781, "longitude": -87.6298},
+        "accept_language": "en-US,en;q=0.9",
+        "platforms": [
+            "Windows NT 10.0; Win64; x64",
+            "X11; Linux x86_64",
+        ],
+    },
+    {
+        "locale": "en-US",
+        "timezone_id": "America/Denver",
+        "geolocation": {"latitude": 39.7392, "longitude": -104.9903},
+        "accept_language": "en-US,en;q=0.9",
+        "platforms": [
+            "Windows NT 10.0; Win64; x64",
+        ],
+    },
+    {
+        "locale": "en-US",
+        "timezone_id": "America/Los_Angeles",
+        "geolocation": {"latitude": 34.0522, "longitude": -118.2437},
+        "accept_language": "en-US,en;q=0.9",
+        "platforms": [
+            "Windows NT 10.0; Win64; x64",
+            "Macintosh; Intel Mac OS X 10_15_7",
+            "X11; Linux x86_64",
+        ],
+    },
+    {
+        "locale": "en-GB",
+        "timezone_id": "Europe/London",
+        "geolocation": {"latitude": 51.5074, "longitude": -0.1278},
+        "accept_language": "en-GB,en;q=0.9",
+        "platforms": [
+            "Windows NT 10.0; Win64; x64",
+            "Macintosh; Intel Mac OS X 10_15_7",
+        ],
+    },
+    {
+        "locale": "en-AU",
+        "timezone_id": "Australia/Sydney",
+        "geolocation": {"latitude": -33.8688, "longitude": 151.2093},
+        "accept_language": "en-AU,en;q=0.9",
+        "platforms": [
+            "Macintosh; Intel Mac OS X 10_15_7",
+            "Windows NT 10.0; Win64; x64",
+        ],
+    },
+    {
+        "locale": "en-CA",
+        "timezone_id": "America/Toronto",
+        "geolocation": {"latitude": 43.6532, "longitude": -79.3832},
+        "accept_language": "en-CA,en;q=0.9",
+        "platforms": [
+            "Windows NT 10.0; Win64; x64",
+            "Macintosh; Intel Mac OS X 10_15_7",
+        ],
+    },
+    {
+        "locale": "en-US",
+        "timezone_id": "America/Phoenix",
+        "geolocation": {"latitude": 33.4484, "longitude": -112.0740},
+        "accept_language": "en-US,en;q=0.9",
+        "platforms": [
+            "Windows NT 10.0; Win64; x64",
+        ],
+    },
+    {
+        "locale": "en-US",
+        "timezone_id": "Pacific/Honolulu",
+        "geolocation": {"latitude": 21.3069, "longitude": -157.8583},
+        "accept_language": "en-US,en;q=0.9",
+        "platforms": [
+            "Macintosh; Intel Mac OS X 10_15_7",
+        ],
+    },
 ]
 
 
@@ -96,17 +171,26 @@ def random_name(length: int = 5) -> str:
 def generate_fingerprint() -> Dict:
     chrome_ver = random.choice(CHROME_VERSIONS)
     viewport = random.choice(VIEWPORT_PRESETS)
-    locale, tz = random.choice(LOCALE_TZ_PAIRS)
-    platform_part, browser_part = random.choice(PLATFORM_UA_TEMPLATES)
+    profile = random.choice(FINGERPRINT_PROFILES)
+    platform_part = random.choice(profile["platforms"])
     ua = (
         f"Mozilla/5.0 ({platform_part}) AppleWebKit/537.36 "
-        f"(KHTML, like Gecko) {browser_part.format(ver=chrome_ver)}"
+        f"(KHTML, like Gecko) Chrome/{chrome_ver} Safari/537.36"
     )
+    geo = profile["geolocation"]
     return {
         "user_agent": ua,
         "viewport": viewport,
-        "locale": locale,
-        "timezone_id": tz,
+        "locale": profile["locale"],
+        "timezone_id": profile["timezone_id"],
+        "geolocation": {
+            "latitude": geo["latitude"] + random.uniform(-0.05, 0.05),
+            "longitude": geo["longitude"] + random.uniform(-0.05, 0.05),
+            "accuracy": random.randint(10, 100),
+        },
+        "accept_language": profile["accept_language"],
+        "color_scheme": random.choice(COLOR_SCHEMES),
+        "device_scale_factor": random.choice(DEVICE_SCALE_FACTORS),
     }
 
 
@@ -116,7 +200,11 @@ async def human_delay(min_ms: int = 500, max_ms: int = 2000) -> None:
 
 async def human_type(locator, text: str) -> None:
     try:
-        await locator.press_sequentially(text, delay=random.uniform(60, 180))
+        await locator.click()
+        await human_delay(200, 500)
+        await locator.press_sequentially(text, delay=random.uniform(50, 200))
+        if random.random() < 0.3:
+            await human_delay(100, 400)
     except Exception:
         await locator.fill(text)
 
@@ -127,7 +215,8 @@ async def human_mouse_move(
     vp = page.viewport_size or {"width": 1920, "height": 1080}
     target_x = x if x is not None else random.randint(100, vp["width"] - 100)
     target_y = y if y is not None else random.randint(100, vp["height"] - 100)
-    await page.mouse.move(target_x, target_y, steps=random.randint(8, 25))
+    steps = random.randint(8, 30)
+    await page.mouse.move(target_x, target_y, steps=steps)
 
 
 async def human_scroll(page, direction: str = "down") -> None:
@@ -138,25 +227,170 @@ async def human_scroll(page, direction: str = "down") -> None:
     await human_delay(300, 800)
 
 
+async def human_hesitation(page) -> None:
+    """Simulate brief mouse wandering before clicking, as a real user might."""
+    vp = page.viewport_size or {"width": 1920, "height": 1080}
+    for _ in range(random.randint(1, 3)):
+        x = random.randint(200, vp["width"] - 200)
+        y = random.randint(200, vp["height"] - 200)
+        await page.mouse.move(x, y, steps=random.randint(5, 15))
+        await human_delay(150, 500)
+
+
+async def human_read_pause(page) -> None:
+    """Simulate reading page content (longer pause with occasional scroll)."""
+    await human_delay(2000, 6000)
+    if random.random() < 0.5:
+        await human_scroll(page, random.choice(["down", "down", "up"]))
+    await human_delay(500, 1500)
+
+
 async def simulate_human_presence(page) -> None:
     await human_delay(800, 2000)
     await human_mouse_move(page)
     await human_delay(300, 800)
-    if random.random() < 0.4:
+    if random.random() < 0.5:
         await human_scroll(page)
+    if random.random() < 0.3:
+        await human_hesitation(page)
+    if random.random() < 0.25:
+        await human_read_pause(page)
     await human_delay(200, 600)
 
 
+def build_anti_detect_script(fingerprint: Dict) -> str:
+    locale = fingerprint.get("locale", "en-US")
+    lang_primary = locale.split("-")[0]
+    platform_ua = fingerprint.get("user_agent", "")
+    if "Windows" in platform_ua:
+        nav_platform = "Win32"
+    elif "Macintosh" in platform_ua:
+        nav_platform = "MacIntel"
+    else:
+        nav_platform = "Linux x86_64"
+    return """
+    (function() {
+        // WebRTC IP leak protection
+        if (window.RTCPeerConnection) {
+            const OrigRTC = window.RTCPeerConnection;
+            window.RTCPeerConnection = function(config, constraints) {
+                if (config && config.iceServers) { config.iceServers = []; }
+                return new OrigRTC(config, constraints);
+            };
+            window.RTCPeerConnection.prototype = OrigRTC.prototype;
+            window.RTCPeerConnection.generateCertificate = OrigRTC.generateCertificate;
+        }
+        if (window.webkitRTCPeerConnection) {
+            const OrigWebkitRTC = window.webkitRTCPeerConnection;
+            window.webkitRTCPeerConnection = function(config, constraints) {
+                if (config && config.iceServers) { config.iceServers = []; }
+                return new OrigWebkitRTC(config, constraints);
+            };
+            window.webkitRTCPeerConnection.prototype = OrigWebkitRTC.prototype;
+        }
+
+        // navigator property hardening
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined,
+            configurable: true,
+        });
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['""" + locale + """', '""" + lang_primary + """'],
+            configurable: true,
+        });
+        Object.defineProperty(navigator, 'platform', {
+            get: () => '""" + nav_platform + """',
+            configurable: true,
+        });
+
+        // chrome runtime stub
+        if (!window.chrome) { window.chrome = {}; }
+        if (!window.chrome.runtime) {
+            window.chrome.runtime = { connect: function(){}, sendMessage: function(){} };
+        }
+
+        // permissions query patch
+        const origQuery = navigator.permissions.query;
+        navigator.permissions.query = function(params) {
+            if (params.name === 'notifications') {
+                return Promise.resolve({ state: Notification.permission });
+            }
+            return origQuery.call(this, params);
+        };
+
+        // plugins & mimeTypes length spoof
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => {
+                const arr = [
+                    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer',
+                      description: 'Portable Document Format' },
+                    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+                      description: '' },
+                    { name: 'Native Client', filename: 'internal-nacl-plugin',
+                      description: '' },
+                ];
+                arr.item = i => arr[i];
+                arr.namedItem = n => arr.find(p => p.name === n);
+                arr.refresh = () => {};
+                return arr;
+            },
+            configurable: true,
+        });
+    })();
+    """
+
+
 class ProxyRotator:
-    def __init__(self, pool: Optional[List[str]] = None, single: str = ""):
+    def __init__(
+        self,
+        pool: Optional[List[str]] = None,
+        single: str = "",
+        validate: bool = False,
+    ):
         self._proxies: List[str] = []
+        self._failed: List[str] = []
         self._index = 0
+        self._ip_cache: Dict[str, str] = {}
         if pool:
             if isinstance(pool, str):
                 pool = [p.strip() for p in pool.split(",") if p.strip()]
             self._proxies = [p for p in pool if p]
         elif single:
             self._proxies = [single]
+        if validate and self._proxies:
+            self._validate_all()
+
+    def _health_check(self, proxy_url: str, timeout: int = 10) -> bool:
+        import requests as _req
+
+        try:
+            resp = _req.get(
+                "https://httpbin.org/ip",
+                proxies={"http": proxy_url, "https": proxy_url},
+                timeout=timeout,
+            )
+            if resp.status_code == 200:
+                ip = resp.json().get("origin", "unknown")
+                self._ip_cache[proxy_url] = ip
+                logger.info(f"代理可用 [{proxy_url[:40]}] 出口 IP: {ip}")
+                return True
+        except Exception as exc:
+            logger.warning(f"代理不可用 [{proxy_url[:40]}]: {exc}")
+        return False
+
+    def _validate_all(self) -> None:
+        logger.info(f"正在验证 {len(self._proxies)} 个代理...")
+        valid = []
+        for proxy in self._proxies:
+            if self._health_check(proxy):
+                valid.append(proxy)
+            else:
+                self._failed.append(proxy)
+        if valid:
+            self._proxies = valid
+            logger.info(f"代理验证完成: {len(valid)} 可用, {len(self._failed)} 不可用")
+        else:
+            logger.warning("所有代理验证均失败，保留原始列表以便后续重试")
 
     def next(self) -> str:
         if not self._proxies:
@@ -164,6 +398,17 @@ class ProxyRotator:
         proxy = self._proxies[self._index % len(self._proxies)]
         self._index += 1
         return proxy
+
+    def mark_failed(self, proxy_url: str) -> None:
+        if proxy_url and proxy_url in self._proxies and len(self._proxies) > 1:
+            self._proxies.remove(proxy_url)
+            self._failed.append(proxy_url)
+            logger.warning(
+                f"代理已标记为失败: {proxy_url[:40]}... (剩余 {len(self._proxies)})"
+            )
+
+    def get_exit_ip(self, proxy_url: str) -> str:
+        return self._ip_cache.get(proxy_url, "")
 
     @property
     def available(self) -> bool:
@@ -196,13 +441,25 @@ class GeminiRegistrar:
         launch_args: Dict[str, Any] = {"headless": headless}
         if slow_mo_ms > 0:
             launch_args["slow_mo"] = slow_mo_ms
+        launch_args["args"] = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-infobars",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-ipc-flooding-protection",
+        ]
         browser_proxy = (
             self.proxy_url or os.environ.get("PROXY", "") or app_config.PROXY
         )
         if browser_proxy:
             parsed_proxy = urlparse(browser_proxy)
+            scheme = parsed_proxy.scheme or "http"
             proxy_config = {
-                "server": f"http://{parsed_proxy.hostname}:{parsed_proxy.port}"
+                "server": f"{scheme}://{parsed_proxy.hostname}:{parsed_proxy.port}"
             }
             if parsed_proxy.username:
                 proxy_config["username"] = parsed_proxy.username
@@ -317,10 +574,10 @@ class GeminiRegistrar:
                     f"[{email}] 验证码未到达，准备重发 ({index - 1}/{len(attempts) - 1})"
                 )
                 logger.info(
-                    f"æ££æ ¨î‚¼æžî†¿î‡—é‡æ–°å‘é€éªŒè¯ç  ({index - 1}/{len(attempts) - 1})..."
+                    f"[{email}] 正在尝试重新发送验证码 ({index - 1}/{len(attempts) - 1})..."
                 )
                 if not await self._click_resend_code_button(page):
-                    logger.warning("éˆî…å£˜é’ä¼´å™¸éªŒè¯ç æŒ‰é’®å¤±è´¥")
+                    logger.warning(f"[{email}] 点击重新发送验证码按钮失败")
                     continue
                 logger.info(f"[{email}] 已点击重发按钮")
                 await asyncio.sleep(2)
@@ -335,7 +592,7 @@ class GeminiRegistrar:
             if code:
                 logger.info(f"[{email}] 验证码获取成功: {code}")
                 return code
-        raise RuntimeError("éˆî…æ•¹é’ä¼´ç™ç’‡ä½ºçˆœ")
+        raise RuntimeError(f"[{email}] 所有轮次均未收到验证码")
 
     async def _submit_verification_code(self, page, code_input, code: str) -> None:
         await human_type(code_input, code)
@@ -373,7 +630,7 @@ class GeminiRegistrar:
                     return match.group(1)
         except Exception as exc:
             logger.warning(f"提取 XSRF token 失败: {exc}")
-        return "GXO_B0wnNhs6UQJZMcrSbTsbEEs"
+        raise RuntimeError("无法从页面提取 XSRF token，页面可能未正常加载")
 
     def _build_refresh_auth_url(self, email: str, xsrf_token: str) -> str:
         login_hint = quote(email, safe="")
@@ -404,12 +661,24 @@ class GeminiRegistrar:
         if match:
             self.credential.config_id = match.group(1)
 
+    async def _save_failure_screenshot(self, page, email: str) -> None:
+        try:
+            screenshot_dir = "screenshots"
+            os.makedirs(screenshot_dir, exist_ok=True)
+            filename = f"{screenshot_dir}/fail_{email}_{int(time.time())}.png"
+            await page.screenshot(path=filename, full_page=True)
+            logger.info(f"[{email}] 失败截图已保存: {filename}")
+        except Exception:
+            pass
+
     async def execute(self, existing_account: Optional[Dict] = None) -> bool:
         from playwright.async_api import (
             TimeoutError as PlaywrightTimeoutError,
             async_playwright,
         )
 
+        _page = None
+        _email = ""
         try:
             async with async_playwright() as playwright:
                 launch_args = self._build_launch_args()
@@ -431,6 +700,7 @@ class GeminiRegistrar:
                     if existing_account
                     else self.mail_provider.create_email()
                 )
+                _email = email
                 account_fields = self.mail_provider.export_account_fields()
                 self.credential.email = email
                 self.credential.mail_provider = account_fields.get("mail_provider", "")
@@ -445,12 +715,21 @@ class GeminiRegistrar:
                     viewport=fp["viewport"],
                     locale=fp["locale"],
                     timezone_id=fp["timezone_id"],
+                    color_scheme=fp.get("color_scheme", "light"),
+                    device_scale_factor=fp.get("device_scale_factor", 1),
+                    geolocation=fp.get("geolocation"),
+                    permissions=["geolocation"],
+                    extra_http_headers={
+                        "Accept-Language": fp.get("accept_language", "en-US,en;q=0.9"),
+                    },
                 )
                 page = await context.new_page()
+                _page = page
                 if HAS_STEALTH and stealth_async is not None:
                     await stealth_async(page)
                 else:
                     logger.warning("playwright-stealth 未安装，反检测能力受限")
+                await page.add_init_script(build_anti_detect_script(fp))
                 try:
                     poll_since_time = datetime.now() - timedelta(seconds=30)
                     if existing_account:
@@ -516,8 +795,8 @@ class GeminiRegistrar:
                         await self.finish_login(page)
                         await self._populate_credentials_from_session(context, page)
                         if not self.credential.is_complete():
-                            raise RuntimeError("éˆî‡å…˜éŽ»æ„¬å½‡ç€¹å±¾æš£é‘î…¡ç˜‰")
-                        logger.info(f"ç’ï¹€å½¿æ¾¶å‹­æ‚ŠéŽ´æ„¬å§›: {email}")
+                            raise RuntimeError(f"[{email}] 凭证不完整，无法提取完整会话信息")
+                        logger.info(f"[{email}] 直接登录成功，已提取凭证")
                         return True
                     if landing_state != "verify":
                         raise RuntimeError(
@@ -580,9 +859,13 @@ class GeminiRegistrar:
                     await browser.close()
         except PlaywrightTimeoutError as exc:
             logger.error(f"页面等待超时: {exc}")
+            if _page:
+                await self._save_failure_screenshot(_page, _email)
             return False
         except Exception as exc:
             logger.error(f"账号处理失败: {exc}")
+            if _page:
+                await self._save_failure_screenshot(_page, _email)
             return False
 
     async def finish_login(self, page) -> None:

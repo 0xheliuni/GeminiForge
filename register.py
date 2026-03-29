@@ -99,6 +99,19 @@ async def main() -> None:
             False,
             bool,
         ),
+        "register_max_retries": pick_config(
+            file_config, "REGISTER_MAX_RETRIES", "register_max_retries", 2, int
+        ),
+        "proxy_validate": pick_config(
+            file_config, "PROXY_VALIDATE", "proxy_validate", False, bool
+        ),
+        "save_failure_screenshots": pick_config(
+            file_config,
+            "SAVE_FAILURE_SCREENSHOTS",
+            "save_failure_screenshots",
+            True,
+            bool,
+        ),
     }
     validate_config(config, str(config["run_mode"]))
 
@@ -108,7 +121,10 @@ async def main() -> None:
     else:
         raw_pool = file_config.get("proxy_pool", [])
         proxy_pool_list = raw_pool if isinstance(raw_pool, list) else []
-    rotator = ProxyRotator(pool=proxy_pool_list, single=app_config.PROXY)
+    proxy_validate = bool(config.get("proxy_validate", False))
+    rotator = ProxyRotator(
+        pool=proxy_pool_list, single=app_config.PROXY, validate=proxy_validate
+    )
 
     print(f"\n{'=' * 56}")
     print("  GeminiForge")

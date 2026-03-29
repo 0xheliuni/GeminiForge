@@ -7,6 +7,7 @@ VLESS 代理启动器
 import os
 import json
 import subprocess
+import tempfile
 import time
 import logging
 from typing import Any, Dict, Optional
@@ -158,8 +159,7 @@ def generate_singbox_config(vless_config: Dict[str, Any]) -> Dict[str, Any]:
 def start_singbox(config: Dict[str, Any]) -> Optional[subprocess.Popen]:
     """启动sing-box"""
 
-    # 写入配置文件
-    config_path = "/tmp/singbox_config.json"
+    config_path = os.path.join(tempfile.gettempdir(), "singbox_config.json")
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2)
 

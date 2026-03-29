@@ -14,11 +14,14 @@
   "refresh_before_hours": 0,
   "refresh_limit": 0,
   "refresh_include_disabled": false,
+  "register_max_retries": 2,
   "account_expire_hours": 20,
   "browser_headless": true,
   "browser_slow_mo_ms": 0,
   "proxy": "",
   "proxy_pool": [],
   "proxy_email": false,
+  "proxy_validate": false,
+  "save_failure_screenshots": true,
   "vless_config": ""
 }
