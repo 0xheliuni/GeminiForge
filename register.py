@@ -121,6 +121,22 @@ async def main() -> None:
     else:
         raw_pool = file_config.get("proxy_pool", [])
         proxy_pool_list = raw_pool if isinstance(raw_pool, list) else []
+
+    if proxy_pool_list:
+        try:
+            from proxy_helper import setup_proxy_pool
+
+            logger.info("正在处理代理池（支持订阅链接/VLESS/VMESS/HTTP代理）...")
+            converted, _sb_procs = setup_proxy_pool(proxy_pool_list)
+            if converted:
+                proxy_pool_list = converted
+                logger.info(f"代理池处理完成，可用代理: {len(converted)} 个")
+            else:
+                logger.warning("代理池处理后无可用代理")
+                proxy_pool_list = []
+        except Exception as exc:
+            logger.warning(f"代理池初始化失败: {exc}，将尝试使用原始列表")
+
     proxy_validate = bool(config.get("proxy_validate", False))
     rotator = ProxyRotator(
         pool=proxy_pool_list, single=app_config.PROXY, validate=proxy_validate

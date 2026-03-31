@@ -68,7 +68,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install sing-box
-        if: ${{ env.VLESS_CONFIG != '' }}
+        if: ${{ env.VLESS_CONFIG != '' || env.PROXY_POOL != '' }}
         run: |
           curl -Lo sing-box.tar.gz https://github.com/SagerNet/sing-box/releases/download/v1.8.0/sing-box-1.8.0-linux-amd64.tar.gz
           tar -xzf sing-box.tar.gz
@@ -141,3 +141,12 @@ jobs:
           name: registration-log-${{ github.run_number }}
           path: '*.log'
           retention-days: 7
+
+      - name: Upload failure screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_number }}
+          path: 'screenshots/'
+          retention-days: 7
+          if-no-files-found: ignore

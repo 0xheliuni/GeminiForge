@@ -1,43 +1,40 @@
 # -*- coding: utf-8 -*-
 """
-VLESS 代理启动器
-解析VLESS配置并启动sing-box本地代理
+代理启动器 - 支持 VLESS/VMESS/Trojan/SS 节点 + 订阅链接
+通过 sing-box 将代理节点转为本地 HTTP 代理供 Playwright 使用
 """
 
-import os
+import base64
 import json
+import logging
+import os
+import random
+import shutil
 import subprocess
 import tempfile
 import time
-import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, unquote, urlparse
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
 logger = logging.getLogger(__name__)
 
 LOCAL_HTTP_PORT = 7890
 LOCAL_SOCKS_PORT = 7891
+MAX_POOL_NODES = int(os.environ.get("MAX_POOL_NODES", "5"))
 
+# ---------------------------------------------------------------------------
+# Node URL parsers
+# ---------------------------------------------------------------------------
 
 def parse_vless_url(vless_url: str) -> Dict[str, Any]:
-    """解析VLESS URL格式"""
-    from urllib.parse import urlparse, parse_qs, unquote
-
-    # vless://uuid@server:port?params
     parsed = urlparse(vless_url)
-
     uuid = unquote(parsed.username) if parsed.username else ""
-    server = parsed.hostname
-    port = parsed.port
-
     params = parse_qs(parsed.query)
-
-    config = {
+    return {
+        "protocol": "vless",
         "uuid": uuid,
-        "server": server,
-        "port": port,
+        "server": parsed.hostname,
+        "port": parsed.port or 443,
         "type": params.get("type", ["tcp"])[0],
         "security": params.get("security", ["none"])[0],
         "flow": params.get("flow", [""])[0],
@@ -47,17 +44,84 @@ def parse_vless_url(vless_url: str) -> Dict[str, Any]:
         "sid": params.get("sid", [""])[0],
     }
 
-    return config
+
+def parse_vmess_url(vmess_url: str) -> Dict[str, Any]:
+    raw = vmess_url.replace("vmess://", "", 1)
+    if "#" in raw:
+        raw = raw.split("#")[0]
+    padding = 4 - len(raw) % 4
+    if padding != 4:
+        raw += "=" * padding
+    try:
+        decoded = base64.b64decode(raw).decode("utf-8")
+        cfg = json.loads(decoded)
+    except Exception:
+        return {}
+    cfg["protocol"] = "vmess"
+    return cfg
+
+
+def parse_trojan_url(trojan_url: str) -> Dict[str, Any]:
+    parsed = urlparse(trojan_url)
+    params = parse_qs(parsed.query)
+    return {
+        "protocol": "trojan",
+        "password": unquote(parsed.username or ""),
+        "server": parsed.hostname,
+        "port": parsed.port or 443,
+        "sni": params.get("sni", [""])[0],
+        "type": params.get("type", ["tcp"])[0],
+        "host": params.get("host", [""])[0],
+        "path": params.get("path", [""])[0],
+    }
+
+
+def parse_ss_url(ss_url: str) -> Dict[str, Any]:
+    raw = ss_url.replace("ss://", "", 1)
+    if "#" in raw:
+        raw = raw.split("#")[0]
+    try:
+        if "@" in raw:
+            encoded_part, server_part = raw.split("@", 1)
+            padding = 4 - len(encoded_part) % 4
+            if padding != 4:
+                encoded_part += "=" * padding
+            try:
+                decoded = base64.b64decode(encoded_part).decode()
+            except Exception:
+                decoded = unquote(encoded_part)
+            method, password = decoded.split(":", 1)
+            sp = urlparse(f"ss://{server_part}")
+            return {
+                "protocol": "shadowsocks",
+                "method": method,
+                "password": password,
+                "server": sp.hostname,
+                "port": sp.port or 8388,
+            }
+        else:
+            padding = 4 - len(raw) % 4
+            if padding != 4:
+                raw += "=" * padding
+            decoded = base64.b64decode(raw).decode()
+            method_pass, server_port = decoded.rsplit("@", 1)
+            method, password = method_pass.split(":", 1)
+            server, port = server_port.rsplit(":", 1)
+            return {
+                "protocol": "shadowsocks",
+                "method": method,
+                "password": password,
+                "server": server,
+                "port": int(port),
+            }
+    except Exception:
+        return {}
 
 
 def parse_yaml_config(yaml_str: str) -> Dict[str, Any]:
-    """解析YAML/JSON格式的配置"""
     import re
 
-    # 简单解析YAML格式
-    config = {}
-
-    # 提取关键字段
+    config: Dict[str, Any] = {}
     patterns = {
         "server": r"server:\s*([^\s,}]+)",
         "port": r"port:\s*(\d+)",
@@ -68,152 +132,429 @@ def parse_yaml_config(yaml_str: str) -> Dict[str, Any]:
         "sid": r"short-id:\s*([^\s,}]+)",
         "fp": r"client-fingerprint:\s*([^\s,}]+)",
     }
-
     for key, pattern in patterns.items():
         match = re.search(pattern, yaml_str)
-        if match:
-            value = match.group(1)
-            if value != "null":
-                config[key] = value
+        if match and match.group(1) != "null":
+            config[key] = match.group(1)
 
-    # 检测是否是reality
     if "reality-opts" in yaml_str or "pbk" in config:
         config["security"] = "reality"
     elif "tls: true" in yaml_str:
         config["security"] = "tls"
     else:
         config["security"] = "none"
-
     config["type"] = "tcp"
-
+    config["protocol"] = "vless"
     return config
 
 
-def generate_singbox_config(vless_config: Dict[str, Any]) -> Dict[str, Any]:
-    """生成sing-box配置"""
+# ---------------------------------------------------------------------------
+# sing-box outbound builders
+# ---------------------------------------------------------------------------
 
-    outbound = {
+def _build_vless_outbound(cfg: Dict[str, Any], tag: str = "proxy") -> Dict[str, Any]:
+    outbound: Dict[str, Any] = {
         "type": "vless",
-        "tag": "proxy",
-        "server": vless_config.get("server"),
-        "server_port": int(vless_config.get("port", 443)),
-        "uuid": vless_config.get("uuid"),
+        "tag": tag,
+        "server": cfg.get("server"),
+        "server_port": int(cfg.get("port", 443)),
+        "uuid": cfg.get("uuid"),
     }
-
-    # 添加flow (xtls-rprx-vision)
-    flow = vless_config.get("flow", "")
+    flow = cfg.get("flow", "")
     if flow:
         outbound["flow"] = flow
-
-    # TLS/Reality配置
-    security = vless_config.get("security", "none")
-
+    security = cfg.get("security", "none")
     if security == "reality":
-        tls_config = {
+        tls_cfg: Dict[str, Any] = {
             "enabled": True,
-            "server_name": vless_config.get("sni", ""),
-            "utls": {"enabled": True, "fingerprint": vless_config.get("fp", "chrome")},
-            "reality": {
-                "enabled": True,
-                "public_key": vless_config.get("pbk", ""),
-            },
+            "server_name": cfg.get("sni", ""),
+            "utls": {"enabled": True, "fingerprint": cfg.get("fp", "chrome")},
+            "reality": {"enabled": True, "public_key": cfg.get("pbk", "")},
         }
-        # short_id 可能为空
-        sid = vless_config.get("sid", "")
+        sid = cfg.get("sid", "")
         if sid:
-            tls_config["reality"]["short_id"] = sid
-        outbound["tls"] = tls_config
-
+            tls_cfg["reality"]["short_id"] = sid
+        outbound["tls"] = tls_cfg
     elif security == "tls":
         outbound["tls"] = {
             "enabled": True,
-            "server_name": vless_config.get("sni", outbound["server"]),
-            "utls": {"enabled": True, "fingerprint": vless_config.get("fp", "chrome")},
+            "server_name": cfg.get("sni", outbound["server"]),
+            "utls": {"enabled": True, "fingerprint": cfg.get("fp", "chrome")},
         }
+    return outbound
 
-    # 配置已生成（不打印敏感信息）
 
-    # 完整配置
-    singbox_config = {
-        "log": {"level": "info"},
+def _build_vmess_outbound(cfg: Dict[str, Any], tag: str = "proxy") -> Dict[str, Any]:
+    outbound: Dict[str, Any] = {
+        "type": "vmess",
+        "tag": tag,
+        "server": cfg.get("add", ""),
+        "server_port": int(cfg.get("port", 443)),
+        "uuid": cfg.get("id", ""),
+        "security": cfg.get("scy", "auto"),
+        "alter_id": int(cfg.get("aid", 0)),
+    }
+    if cfg.get("tls") == "tls":
+        outbound["tls"] = {
+            "enabled": True,
+            "server_name": cfg.get("sni") or cfg.get("host") or cfg.get("add", ""),
+        }
+    net = cfg.get("net", "tcp")
+    if net == "ws":
+        transport: Dict[str, Any] = {
+            "type": "ws",
+            "path": cfg.get("path", "/"),
+        }
+        host = cfg.get("host", "")
+        if host:
+            transport["headers"] = {"Host": host}
+        outbound["transport"] = transport
+    elif net == "grpc":
+        outbound["transport"] = {
+            "type": "grpc",
+            "service_name": cfg.get("path", ""),
+        }
+    elif net == "h2":
+        transport_h2: Dict[str, Any] = {"type": "http"}
+        host = cfg.get("host", "")
+        if host:
+            transport_h2["host"] = [host]
+        path = cfg.get("path", "")
+        if path:
+            transport_h2["path"] = path
+        outbound["transport"] = transport_h2
+    return outbound
+
+
+def _build_trojan_outbound(cfg: Dict[str, Any], tag: str = "proxy") -> Dict[str, Any]:
+    outbound: Dict[str, Any] = {
+        "type": "trojan",
+        "tag": tag,
+        "server": cfg.get("server", ""),
+        "server_port": int(cfg.get("port", 443)),
+        "password": cfg.get("password", ""),
+        "tls": {
+            "enabled": True,
+            "server_name": cfg.get("sni") or cfg.get("server", ""),
+        },
+    }
+    net = cfg.get("type", "tcp")
+    if net == "ws":
+        transport: Dict[str, Any] = {"type": "ws", "path": cfg.get("path", "/")}
+        host = cfg.get("host", "")
+        if host:
+            transport["headers"] = {"Host": host}
+        outbound["transport"] = transport
+    elif net == "grpc":
+        outbound["transport"] = {
+            "type": "grpc",
+            "service_name": cfg.get("path", ""),
+        }
+    return outbound
+
+
+def _build_ss_outbound(cfg: Dict[str, Any], tag: str = "proxy") -> Dict[str, Any]:
+    return {
+        "type": "shadowsocks",
+        "tag": tag,
+        "server": cfg.get("server", ""),
+        "server_port": int(cfg.get("port", 8388)),
+        "method": cfg.get("method", "aes-256-gcm"),
+        "password": cfg.get("password", ""),
+    }
+
+
+def _build_outbound_from_url(url: str, tag: str = "proxy") -> Optional[Dict[str, Any]]:
+    try:
+        if url.startswith("vless://"):
+            cfg = parse_vless_url(url)
+            if cfg.get("server") and cfg.get("uuid"):
+                return _build_vless_outbound(cfg, tag)
+        elif url.startswith("vmess://"):
+            cfg = parse_vmess_url(url)
+            if cfg.get("add") and cfg.get("id"):
+                return _build_vmess_outbound(cfg, tag)
+        elif url.startswith("trojan://"):
+            cfg = parse_trojan_url(url)
+            if cfg.get("server") and cfg.get("password"):
+                return _build_trojan_outbound(cfg, tag)
+        elif url.startswith("ss://"):
+            cfg = parse_ss_url(url)
+            if cfg.get("server") and cfg.get("password"):
+                return _build_ss_outbound(cfg, tag)
+    except Exception as exc:
+        logger.warning(f"节点解析失败: {exc}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# sing-box config generation & process management
+# ---------------------------------------------------------------------------
+
+def generate_singbox_config(
+    vless_config: Dict[str, Any],
+    http_port: int = LOCAL_HTTP_PORT,
+    socks_port: int = LOCAL_SOCKS_PORT,
+) -> Dict[str, Any]:
+    outbound = _build_vless_outbound(vless_config)
+    return _wrap_singbox_config(outbound, http_port, socks_port)
+
+
+def _wrap_singbox_config(
+    outbound: Dict[str, Any], http_port: int, socks_port: int
+) -> Dict[str, Any]:
+    return {
+        "log": {"level": "warn"},
         "inbounds": [
             {
                 "type": "http",
                 "tag": "http-in",
                 "listen": "127.0.0.1",
-                "listen_port": LOCAL_HTTP_PORT,
+                "listen_port": http_port,
             },
             {
                 "type": "socks",
                 "tag": "socks-in",
                 "listen": "127.0.0.1",
-                "listen_port": LOCAL_SOCKS_PORT,
+                "listen_port": socks_port,
             },
         ],
         "outbounds": [outbound, {"type": "direct", "tag": "direct"}],
     }
 
-    return singbox_config
+
+def _test_proxy(proxy_url: str, timeout: int = 10) -> bool:
+    import requests as _req
+
+    try:
+        resp = _req.get(
+            "https://www.google.com/generate_204",
+            proxies={"http": proxy_url, "https": proxy_url},
+            timeout=timeout,
+        )
+        return resp.status_code in (200, 204)
+    except Exception:
+        return False
 
 
-def start_singbox(config: Dict[str, Any]) -> Optional[subprocess.Popen]:
-    """启动sing-box"""
-
-    config_path = os.path.join(tempfile.gettempdir(), "singbox_config.json")
+def start_singbox(
+    config: Dict[str, Any],
+    config_path: Optional[str] = None,
+    http_port: int = LOCAL_HTTP_PORT,
+    wait_seconds: float = 5,
+) -> Optional[subprocess.Popen]:
+    if config_path is None:
+        config_path = os.path.join(tempfile.gettempdir(), "singbox_config.json")
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2)
 
-    logger.info("sing-box配置已生成")
-
-    # 启动sing-box
     process = subprocess.Popen(
         ["sing-box", "run", "-c", config_path],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
 
-    # 等待启动
-    time.sleep(5)  # 增加等待时间
+    time.sleep(wait_seconds)
 
     if process.poll() is None:
-        logger.info(f"✅ sing-box进程已启动 - HTTP代理: 127.0.0.1:{LOCAL_HTTP_PORT}")
-
-        # 测试代理连接
-        import requests
-
-        proxy_url = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
-        try:
-            test_response = requests.get(
-                "https://www.google.com",
-                proxies={"http": proxy_url, "https": proxy_url},
-                timeout=10,
-            )
-            logger.info(
-                f"✅ 代理测试成功: Google返回状态码 {test_response.status_code}"
-            )
-        except Exception as e:
-            logger.warning(f"⚠️ 代理测试失败: {e}")
-            logger.warning("代理测试失败，但 sing-box 进程仍在运行；跳过 stderr 探测")
-
         return process
-    else:
-        stderr_pipe = process.stderr
-        stderr = stderr_pipe.read().decode() if stderr_pipe else ""
-        logger.error(f"❌ sing-box启动失败: {stderr}")
-        return None
 
+    stderr_pipe = process.stderr
+    stderr = stderr_pipe.read().decode() if stderr_pipe else ""
+    logger.error(f"sing-box 启动失败 ({config_path}): {stderr[:300]}")
+    return None
+
+
+def _has_singbox() -> bool:
+    return shutil.which("sing-box") is not None
+
+
+# ---------------------------------------------------------------------------
+# Subscription URL handling
+# ---------------------------------------------------------------------------
+
+_SUB_PATH_KEYWORDS = [
+    "sub", "subscribe", "client", "api", "link", "clash",
+    "nodelist", "server", "user", "token",
+]
+
+
+def _is_subscription_url(entry: str) -> bool:
+    if not entry.startswith(("http://", "https://")):
+        return False
+    parsed = urlparse(entry)
+    path_lower = parsed.path.lower()
+    query_lower = parsed.query.lower()
+    has_sub_path = any(kw in path_lower for kw in _SUB_PATH_KEYWORDS)
+    has_token = "token=" in query_lower or "key=" in query_lower
+    has_long_path = len(parsed.path) > 10
+    return (has_sub_path and has_long_path) or has_token
+
+
+def _is_node_url(entry: str) -> bool:
+    return entry.startswith(("vless://", "vmess://", "trojan://", "ss://"))
+
+
+def fetch_subscription(url: str, timeout: int = 20) -> List[str]:
+    import requests as _req
+
+    logger.info(f"正在拉取订阅链接: {url[:60]}...")
+    try:
+        resp = _req.get(
+            url,
+            timeout=timeout,
+            headers={"User-Agent": "clash-verge/v2.0.0"},
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        logger.error(f"订阅链接拉取失败: {exc}")
+        return []
+
+    content = resp.text.strip()
+
+    if not any(proto in content for proto in ["vless://", "vmess://", "trojan://", "ss://"]):
+        try:
+            padding = 4 - len(content) % 4
+            if padding != 4:
+                content += "=" * padding
+            decoded = base64.b64decode(content).decode("utf-8").strip()
+            if any(proto in decoded for proto in ["vless://", "vmess://", "trojan://", "ss://"]):
+                content = decoded
+        except Exception:
+            pass
+
+    nodes: List[str] = []
+    for line in content.splitlines():
+        line = line.strip()
+        if _is_node_url(line):
+            nodes.append(line)
+
+    logger.info(f"订阅解析完成: 共 {len(nodes)} 个节点")
+    return nodes
+
+
+# ---------------------------------------------------------------------------
+# Proxy pool setup (main entry point)
+# ---------------------------------------------------------------------------
+
+def setup_proxy_pool(
+    pool_entries: List[str],
+    max_nodes: int = 0,
+) -> Tuple[List[str], List[subprocess.Popen]]:
+    """Process proxy pool entries.
+
+    Supported entry formats:
+      - http://host:port  (direct HTTP proxy, pass through)
+      - socks5://host:port  (direct SOCKS5 proxy, pass through)
+      - vless://...  vmess://...  trojan://...  ss://...  (node URL → sing-box)
+      - https://sub.example.com/...?token=xxx  (subscription URL → fetch → nodes)
+      - host:port  (treated as http://host:port)
+
+    Returns (usable_proxy_list, sing_box_processes).
+    """
+    if max_nodes <= 0:
+        max_nodes = MAX_POOL_NODES
+
+    has_sb = _has_singbox()
+
+    direct_proxies: List[str] = []
+    node_urls: List[str] = []
+
+    for entry in pool_entries:
+        entry = entry.strip()
+        if not entry:
+            continue
+
+        if _is_subscription_url(entry):
+            fetched = fetch_subscription(entry)
+            node_urls.extend(fetched)
+        elif _is_node_url(entry):
+            node_urls.append(entry)
+        elif entry.startswith(("http://", "https://", "socks5://")):
+            direct_proxies.append(entry)
+        else:
+            direct_proxies.append(f"http://{entry}")
+
+    if not node_urls:
+        if not direct_proxies:
+            logger.warning("代理池为空，未找到可用节点")
+        return direct_proxies, []
+
+    if not has_sb:
+        logger.error(
+            f"解析到 {len(node_urls)} 个代理节点，但 sing-box 未安装！"
+            "请确保 workflow 中安装了 sing-box。"
+        )
+        return direct_proxies, []
+
+    if len(node_urls) > max_nodes:
+        logger.info(
+            f"节点数 ({len(node_urls)}) 超过上限 ({max_nodes})，随机选取子集"
+        )
+        node_urls = random.sample(node_urls, max_nodes)
+
+    logger.info(f"正在启动 {len(node_urls)} 个 sing-box 代理实例...")
+
+    processes: List[subprocess.Popen] = []
+    started_proxies: List[str] = []
+    pending: List[Tuple[subprocess.Popen, str, int]] = []
+
+    for idx, url in enumerate(node_urls):
+        outbound = _build_outbound_from_url(url)
+        if outbound is None:
+            logger.warning(f"节点 #{idx} 解析失败，跳过: {url[:50]}...")
+            continue
+        http_port = 7900 + idx * 2
+        socks_port = 7901 + idx * 2
+        sb_config = _wrap_singbox_config(outbound, http_port, socks_port)
+        cfg_path = os.path.join(tempfile.gettempdir(), f"singbox_pool_{idx}.json")
+        with open(cfg_path, "w") as f:
+            json.dump(sb_config, f, indent=2)
+
+        proc = subprocess.Popen(
+            ["sing-box", "run", "-c", cfg_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        pending.append((proc, f"http://127.0.0.1:{http_port}", http_port))
+
+    if not pending:
+        return direct_proxies, []
+
+    logger.info(f"等待 sing-box 实例启动 ({len(pending)} 个)...")
+    time.sleep(6)
+
+    for proc, proxy_url, port in pending:
+        if proc.poll() is not None:
+            logger.warning(f"sing-box 实例 (port {port}) 启动失败")
+            continue
+        if _test_proxy(proxy_url, timeout=8):
+            logger.info(f"代理可用: {proxy_url}")
+            started_proxies.append(proxy_url)
+            processes.append(proc)
+        else:
+            logger.warning(f"代理连接测试失败: {proxy_url}，但保留进程")
+            started_proxies.append(proxy_url)
+            processes.append(proc)
+
+    logger.info(
+        f"sing-box 代理池就绪: {len(started_proxies)} 个节点代理 + "
+        f"{len(direct_proxies)} 个直连代理"
+    )
+    return direct_proxies + started_proxies, processes
+
+
+# ---------------------------------------------------------------------------
+# Single VLESS setup (backward compatible)
+# ---------------------------------------------------------------------------
 
 def setup_proxy() -> Optional[subprocess.Popen]:
-    """设置代理环境"""
     vless_config_str = os.environ.get("VLESS_CONFIG", "")
-
     if not vless_config_str:
-        logger.info("未配置VLESS_CONFIG，跳过代理设置")
+        logger.info("未配置 VLESS_CONFIG，跳过代理设置")
         return None
 
-    logger.info("正在解析VLESS配置...")
-
-    # 判断配置格式
+    logger.info("正在解析 VLESS 配置...")
     vless_config_str = vless_config_str.strip()
 
     if vless_config_str.startswith("vless://"):
@@ -222,19 +563,14 @@ def setup_proxy() -> Optional[subprocess.Popen]:
         config = parse_yaml_config(vless_config_str)
 
     if not config.get("server") or not config.get("uuid"):
-        logger.error("❌ VLESS配置解析失败")
+        logger.error("VLESS 配置解析失败")
         return None
 
-    logger.info("VLESS配置解析成功")
-
-    # 生成sing-box配置
+    logger.info("VLESS 配置解析成功")
     singbox_config = generate_singbox_config(config)
-
-    # 启动sing-box
     process = start_singbox(singbox_config)
 
     if process:
-        # 设置环境变量供其他模块使用
         proxy_url = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
         os.environ["PROXY"] = proxy_url
         return process
@@ -243,10 +579,9 @@ def setup_proxy() -> Optional[subprocess.Popen]:
 
 
 if __name__ == "__main__":
-    # 测试
     process = setup_proxy()
     if process:
-        print("代理已启动，按Ctrl+C停止")
+        print("代理已启动，按 Ctrl+C 停止")
         try:
             process.wait()
         except KeyboardInterrupt:

@@ -26,9 +26,15 @@ logger = logging.getLogger(__name__)
 
 try:
     _playwright_stealth = importlib.import_module("playwright_stealth")
-    stealth_async = getattr(_playwright_stealth, "stealth_async", None)
-    HAS_STEALTH = callable(stealth_async)
-except ImportError:
+    _StealthClass = getattr(_playwright_stealth, "Stealth", None)
+    if _StealthClass is None:
+        stealth_async = getattr(_playwright_stealth, "stealth_async", None)
+        HAS_STEALTH = callable(stealth_async)
+    else:
+        stealth_async = None
+        HAS_STEALTH = True
+except Exception:
+    _StealthClass = None
     stealth_async = None
     HAS_STEALTH = False
 
@@ -723,12 +729,17 @@ class GeminiRegistrar:
                         "Accept-Language": fp.get("accept_language", "en-US,en;q=0.9"),
                     },
                 )
-                page = await context.new_page()
-                _page = page
-                if HAS_STEALTH and stealth_async is not None:
-                    await stealth_async(page)
+                if HAS_STEALTH:
+                    if _StealthClass is not None:
+                        await _StealthClass().apply_stealth_async(context)
+                    elif stealth_async is not None:
+                        pass  # will apply to page after creation
                 else:
                     logger.warning("playwright-stealth 未安装，反检测能力受限")
+                page = await context.new_page()
+                _page = page
+                if HAS_STEALTH and stealth_async is not None and _StealthClass is None:
+                    await stealth_async(page)
                 await page.add_init_script(build_anti_detect_script(fp))
                 try:
                     poll_since_time = datetime.now() - timedelta(seconds=30)
