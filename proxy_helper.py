@@ -395,42 +395,206 @@ def _is_node_url(entry: str) -> bool:
     return entry.startswith(("vless://", "vmess://", "trojan://", "ss://"))
 
 
+def _try_base64_decode(text: str) -> str:
+    try:
+        raw = text.strip()
+        padding = 4 - len(raw) % 4
+        if padding != 4:
+            raw += "=" * padding
+        decoded = base64.b64decode(raw).decode("utf-8").strip()
+        if any(p in decoded for p in ("://",)):
+            return decoded
+    except Exception:
+        pass
+    return ""
+
+
+def _extract_node_urls(text: str) -> List[str]:
+    nodes: List[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if _is_node_url(line):
+            nodes.append(line)
+    return nodes
+
+
+def _parse_clash_proxies(content: str) -> List[Dict[str, str]]:
+    """Extract proxy configs from Clash YAML without a YAML library."""
+    import re
+
+    if "proxies:" not in content:
+        return []
+
+    results: List[Dict[str, str]] = []
+
+    for m in re.finditer(r"-\s*\{([^}]+)\}", content):
+        pairs: Dict[str, str] = {}
+        for kv in re.finditer(
+            r"""([\w-]+)\s*:\s*(?:"([^"]*)"|'([^']*)'|(\S+?))\s*(?:,|$)""",
+            m.group(1),
+        ):
+            pairs[kv.group(1)] = kv.group(2) or kv.group(3) or kv.group(4) or ""
+        if pairs.get("type") and pairs.get("server"):
+            results.append(pairs)
+
+    if results:
+        return results
+
+    lines = content.split("\n")
+    in_proxies = False
+    current: Dict[str, str] = {}
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "proxies:":
+            in_proxies = True
+            continue
+        if not in_proxies:
+            continue
+        if line and not line[0].isspace() and ":" in stripped and not stripped.startswith("-"):
+            break
+        if stripped.startswith("- "):
+            if current and current.get("type") and current.get("server"):
+                results.append(current)
+            current = {}
+            rest = stripped[2:].strip()
+            kv_m = re.match(r"([\w-]+)\s*:\s*(?:\"([^\"]*)\"|'([^']*)'|(.*))", rest)
+            if kv_m:
+                current[kv_m.group(1)] = (
+                    kv_m.group(2) or kv_m.group(3) or kv_m.group(4) or ""
+                ).strip()
+        elif stripped and in_proxies:
+            kv_m = re.match(r"([\w-]+)\s*:\s*(?:\"([^\"]*)\"|'([^']*)'|(.*))", stripped)
+            if kv_m:
+                current[kv_m.group(1)] = (
+                    kv_m.group(2) or kv_m.group(3) or kv_m.group(4) or ""
+                ).strip()
+
+    if current and current.get("type") and current.get("server"):
+        results.append(current)
+
+    return results
+
+
+def _clash_proxy_to_url(proxy: Dict[str, str]) -> Optional[str]:
+    proxy_type = proxy.get("type", "").lower()
+    server = proxy.get("server", "")
+    port = proxy.get("port", "443")
+    if not server:
+        return None
+
+    if proxy_type == "vless":
+        uuid = proxy.get("uuid", "")
+        if not uuid:
+            return None
+        params = [f"type={proxy.get('network', 'tcp')}"]
+        tls = proxy.get("tls", "")
+        if tls in ("true", "True", "1"):
+            params.append("security=tls")
+            sni = proxy.get("servername", "")
+            if sni:
+                params.append(f"sni={sni}")
+        flow = proxy.get("flow", "")
+        if flow:
+            params.append(f"flow={flow}")
+        fp = proxy.get("client-fingerprint", "")
+        if fp:
+            params.append(f"fp={fp}")
+        return f"vless://{uuid}@{server}:{port}?{'&'.join(params)}"
+
+    if proxy_type == "vmess":
+        vmess_cfg = {
+            "v": "2",
+            "ps": proxy.get("name", ""),
+            "add": server,
+            "port": str(port),
+            "id": proxy.get("uuid", ""),
+            "aid": str(proxy.get("alterId", "0")),
+            "scy": proxy.get("cipher", "auto"),
+            "net": proxy.get("network", "tcp"),
+            "type": "none",
+            "host": "",
+            "path": "",
+            "tls": "tls" if proxy.get("tls") in ("true", "True", "1") else "",
+            "sni": proxy.get("servername", ""),
+        }
+        return f"vmess://{base64.b64encode(json.dumps(vmess_cfg).encode()).decode()}"
+
+    if proxy_type == "trojan":
+        pw = proxy.get("password", "")
+        if not pw:
+            return None
+        sni = proxy.get("sni") or proxy.get("servername", "")
+        url = f"trojan://{pw}@{server}:{port}"
+        if sni:
+            url += f"?sni={sni}"
+        return url
+
+    if proxy_type in ("ss", "shadowsocks"):
+        method = proxy.get("cipher", "aes-256-gcm")
+        pw = proxy.get("password", "")
+        if not pw:
+            return None
+        encoded = base64.b64encode(f"{method}:{pw}".encode()).decode()
+        return f"ss://{encoded}@{server}:{port}"
+
+    return None
+
+
 def fetch_subscription(url: str, timeout: int = 20) -> List[str]:
     import requests as _req
 
     logger.info(f"正在拉取订阅链接: {url[:60]}...")
-    try:
-        resp = _req.get(
-            url,
-            timeout=timeout,
-            headers={"User-Agent": "clash-verge/v2.0.0"},
-        )
-        resp.raise_for_status()
-    except Exception as exc:
-        logger.error(f"订阅链接拉取失败: {exc}")
+
+    user_agents = [
+        "v2rayN/6.42",
+        "V2rayU/4.0.0",
+        "Mozilla/5.0",
+    ]
+
+    content = ""
+    for ua in user_agents:
+        try:
+            resp = _req.get(url, timeout=timeout, headers={"User-Agent": ua})
+            resp.raise_for_status()
+            content = resp.text.strip()
+            if content:
+                logger.info(f"订阅拉取成功 (UA={ua[:15]})，内容长度: {len(content)}")
+                break
+        except Exception as exc:
+            logger.warning(f"订阅拉取失败 (UA={ua[:15]}): {exc}")
+
+    if not content:
+        logger.error("订阅链接所有尝试均失败")
         return []
 
-    content = resp.text.strip()
+    nodes = _extract_node_urls(content)
+    if nodes:
+        logger.info(f"订阅解析完成 (明文): {len(nodes)} 个节点")
+        return nodes
 
-    if not any(proto in content for proto in ["vless://", "vmess://", "trojan://", "ss://"]):
-        try:
-            padding = 4 - len(content) % 4
-            if padding != 4:
-                content += "=" * padding
-            decoded = base64.b64decode(content).decode("utf-8").strip()
-            if any(proto in decoded for proto in ["vless://", "vmess://", "trojan://", "ss://"]):
-                content = decoded
-        except Exception:
-            pass
+    decoded = _try_base64_decode(content)
+    if decoded:
+        nodes = _extract_node_urls(decoded)
+        if nodes:
+            logger.info(f"订阅解析完成 (base64): {len(nodes)} 个节点")
+            return nodes
 
-    nodes: List[str] = []
-    for line in content.splitlines():
-        line = line.strip()
-        if _is_node_url(line):
-            nodes.append(line)
+    clash_proxies = _parse_clash_proxies(content)
+    if clash_proxies:
+        logger.info(f"检测到 Clash YAML 格式，解析到 {len(clash_proxies)} 个节点")
+        for proxy_dict in clash_proxies:
+            node_url = _clash_proxy_to_url(proxy_dict)
+            if node_url:
+                nodes.append(node_url)
+        if nodes:
+            logger.info(f"Clash YAML 转换完成: {len(nodes)} 个可用节点")
+            return nodes
 
-    logger.info(f"订阅解析完成: 共 {len(nodes)} 个节点")
-    return nodes
+    logger.warning(
+        f"订阅内容无法解析为代理节点 (前200字: {content[:200]})"
+    )
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -466,12 +630,27 @@ def setup_proxy_pool(
             continue
 
         if _is_subscription_url(entry):
+            logger.info(f"[代理池] 检测为订阅链接: {entry[:60]}...")
             fetched = fetch_subscription(entry)
             node_urls.extend(fetched)
         elif _is_node_url(entry):
+            logger.info(f"[代理池] 检测为节点 URL: {entry[:40]}...")
             node_urls.append(entry)
         elif entry.startswith(("http://", "https://", "socks5://")):
-            direct_proxies.append(entry)
+            parsed_e = urlparse(entry)
+            if parsed_e.port:
+                logger.info(f"[代理池] 检测为直连代理: {entry[:50]}")
+                direct_proxies.append(entry)
+            else:
+                logger.warning(
+                    f"[代理池] HTTP(S) URL 无端口号，可能是订阅链接: {entry[:60]}..."
+                )
+                fetched = fetch_subscription(entry)
+                if fetched:
+                    node_urls.extend(fetched)
+                else:
+                    logger.warning(f"[代理池] 当作直连代理保留: {entry[:50]}")
+                    direct_proxies.append(entry)
         else:
             direct_proxies.append(f"http://{entry}")
 

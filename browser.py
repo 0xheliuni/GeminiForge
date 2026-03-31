@@ -463,14 +463,23 @@ class GeminiRegistrar:
         )
         if browser_proxy:
             parsed_proxy = urlparse(browser_proxy)
-            scheme = parsed_proxy.scheme or "http"
-            proxy_config = {
-                "server": f"{scheme}://{parsed_proxy.hostname}:{parsed_proxy.port}"
-            }
-            if parsed_proxy.username:
-                proxy_config["username"] = parsed_proxy.username
-                proxy_config["password"] = parsed_proxy.password or ""
-            launch_args["proxy"] = proxy_config
+            if not parsed_proxy.hostname or not parsed_proxy.port:
+                logger.warning(
+                    f"无效的代理 URL（缺少 host 或 port），跳过: {browser_proxy[:60]}"
+                )
+            elif parsed_proxy.path and len(parsed_proxy.path) > 1:
+                logger.warning(
+                    f"代理 URL 包含路径，可能是订阅链接而非代理地址，跳过: {browser_proxy[:60]}"
+                )
+            else:
+                scheme = parsed_proxy.scheme or "http"
+                proxy_config = {
+                    "server": f"{scheme}://{parsed_proxy.hostname}:{parsed_proxy.port}"
+                }
+                if parsed_proxy.username:
+                    proxy_config["username"] = parsed_proxy.username
+                    proxy_config["password"] = parsed_proxy.password or ""
+                launch_args["proxy"] = proxy_config
         return launch_args
 
     @staticmethod
